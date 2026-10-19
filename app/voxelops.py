@@ -1,0 +1,119 @@
+"""体素工具：把网格栅格化后做形态学操作，再重建回网格。
+
+镂空、加厚、消解自交都走这条路——比布尔运算稳，代价是锐边会被轻微圆化。
+坐标换算依赖 VoxelGrid.transform（体素索引 → 世界坐标）。
+"""
+from __future__ import annotations
+
+import types
+
+import numpy as np
+import scipy.ndimage as ndi
+import trimesh
+from skimage import measure
+
+
+def choose_pitch(mesh, target_voxels: int = 120, floor: float = 0.2) -> float:
+    """按最长边切成 target_voxels 份，避免大模型把内存撑爆。"""
+    scale = float(max(mesh.extents)) if len(mesh.extents) else 1.0
+    return max(floor, scale / max(20, target_voxels))
+
+
+def to_grid(mesh, pitch: float | None = None):
+    """栅格化并四周补一圈空体素。
+
+    补边是必须的：当模型正好填满自己的包围盒（薄板、立方体都是），
+    grid 会全为 True，marching cubes 找不到 0/1 交界面而直接报错。
+    """
+    p = pitch or choose_pitch(mesh)
+    vox = mesh.voxelized(pitch=p).fill()
+    grid = np.pad(np.asarray(vox.matrix, dtype=bool), 1, constant_values=False)
+    return grid, vox, float(vox.pitch[0])
+
+
+def grid_to_mesh(grid: np.ndarray, vox, pad: int = 1, positive: bool = True) -> trimesh.Trimesh | None:
+    if not grid.any() or grid.all():
+        return None
+    verts, faces, _, _ = measure.marching_cubes(grid.astype(np.float32), level=0.5)
+    verts = verts - float(pad)  # 抵消补边偏移，回到原始体素索引空间
+    homog = np.column_stack([verts, np.ones(len(verts))])
+    world = (vox.transform @ homog.T).T[:, :3]
+    m = trimesh.Trimesh(vertices=world, faces=faces, process=True)
+    # marching cubes 的朝向取决于体素索引顺序，不保证朝外；实体一律修正为正体积
+    if positive and float(m.volume) < 0:
+        m.invert()
+    return m
+
+
+def remesh(mesh, pitch: float | None = None) -> trimesh.Trimesh:
+    """体素重网格：能一次性消解自交与非流形，代价是细节量化到 pitch。"""
+    grid, vox, _ = to_grid(mesh, pitch)
+    out = grid_to_mesh(grid, vox)
+    if out is None:
+        raise ValueError("体素化结果为空，模型可能没有体积")
+    return out
+
+
+def thicken(mesh, amount: float, pitch: float | None = None) -> trimesh.Trimesh:
+    """沿法线向外补 amount 毫米。
+
+    外扩距离场需要足够的空余空间：只补 1 层的话，包围盒外的距离会被截断，
+    整块 grid 都会落进 amount 阈值内，反而变成实心。
+    """
+    grid, vox, p = to_grid(mesh, pitch)
+    extra = int(np.ceil(amount / p)) + 2
+    grid = np.pad(grid, extra, constant_values=False)
+    outside = ndi.distance_transform_edt(~grid) * p
+    grown = grid | (outside <= amount)
+    out = grid_to_mesh(grown, vox, pad=1 + extra)
+    if out is None:
+        raise ValueError("加厚失败：模型体素为空或完全填满")
+    return out
+
+
+def _coarsen_grid(grid: np.ndarray, vox, factor: int):
+    """体素降采样：面数按 factor² 下降，拓扑天然保持。
+
+    比减面安全——fast_simplification 在体素网格上做边折叠必然产生非流形边，
+    内腔一旦非流形，后续打孔布尔运算就会失败。
+    """
+    core = grid[1:-1, 1:-1, 1:-1]
+    small = core[::factor, ::factor, ::factor]
+    coarse_grid = np.pad(small, 1, constant_values=False)
+    t = vox.transform.copy() @ np.diag([factor, factor, factor, 1.0])
+    return coarse_grid, types.SimpleNamespace(transform=t)
+
+
+def hollow_shell(mesh, wall: float, pitch: float | None = None,
+                 coarse: int = 2) -> tuple[trimesh.Trimesh, trimesh.Trimesh]:
+    """返回 (双层壳体, 内腔网格)。内腔法线保证朝内，合并后体积 = 外壳 - 内腔。"""
+    grid, vox, p = to_grid(mesh, pitch)
+    inside = ndi.distance_transform_edt(grid) * p
+    inner_grid = inside > wall
+    if not inner_grid.any():
+        raise ValueError(
+            f"壳厚 {wall}mm 超过模型最薄处的一半，无法镂空。请减小壳厚或先加厚模型。"
+        )
+    if coarse > 1:
+        inner_grid, cvox = _coarsen_grid(inner_grid, vox, coarse)
+    else:
+        cvox = vox
+    cavity = grid_to_mesh(inner_grid, cvox)
+    if cavity is None:
+        raise ValueError("内腔重建失败")
+    # marching cubes 的朝向取决于体素索引顺序，不保证朝内——用体积符号判定，
+    # 内腔必须贡献负体积，否则合并后体积会变成"外壳+内腔"。
+    if float(cavity.volume) > 0:
+        cavity.invert()
+    if not cavity.is_watertight:
+        cavity.merge_vertices()
+    shell = trimesh.util.concatenate([mesh, cavity])
+    return shell, cavity
+
+
+def cavity_volume(mesh, wall: float, pitch: float | None = None) -> float:
+    """预估镂空后可省下的体积（mm³）。"""
+    grid, vox, p = to_grid(mesh, pitch)
+    inside = ndi.distance_transform_edt(grid) * p
+    inner_grid = inside > wall
+    return float(inner_grid.sum() * (p ** 3))
