@@ -789,3 +789,28 @@ def run_job(ctx, params):
     store.update(pid, analysis=report)
     ctx.tick(1.0, "检测完成", "done")
     return {"report": report}
+
+
+def analyze_mesh(mesh, path, params: dict | None = None) -> dict:
+    """对一个内存里的网格跑全套检测，返回报告（不落盘、不依赖任务上下文）。
+
+    修复完成后要立刻复检，用这个即可——不必再起一个检测任务，也避免
+    「修完还拿着修复前的旧报告报警」这种状态不同步。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    params = params or {}
+    stats = meshio.mesh_stats(mesh)
+    # 七项检测彼此独立，线程池并行，耗时压到「最慢那一项」
+    workers = min(4, len(CHECKS))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="rechk") as ex:
+        items = list(ex.map(lambda fn: fn(mesh, params, None), CHECKS))
+    summary = summarize(items)
+    return {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "file": Path(path).name,
+        "stats": stats,
+        "items": items,
+        "summary": summary,
+        "quality": quality_score({"items": items}),
+    }

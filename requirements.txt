@@ -14,3 +14,6 @@ mapbox-earcut>=1.0
 triangle>=20200406
 shapely>=2.0
 lxml>=5.0
+
+# --- 可选：GPU 加速（NVIDIA + CUDA 12.x）。装了自动启用，没装自动退回 CPU。
+#     pip install -r requirements-gpu.txt

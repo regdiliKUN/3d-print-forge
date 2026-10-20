@@ -1051,50 +1051,74 @@ function reportHTML(rep) {
 
 /* ---- 修复 */
 function renderRepair(stage) {
-  const acts = ["merge_vertices", "fill_holes", "fix_normals", "remove_small", "resolve_self_intersection", "rescale", "thicken"];
+  const CORE = ["merge_vertices", "fill_holes", "fix_normals"];
+  const ADV = ["remove_small", "resolve_self_intersection", "rescale", "thicken"];
   const hints = {
-    merge_vertices: "STL 每个三角形存独立顶点，先合并才能判断流形性",
-    fill_holes: "把开放边围成的洞补成三角面",
+    merge_vertices: "先合并重复顶点，才能判断流形性",
+    fill_holes: "曲率感知补洞，补面顺曲率、不塌陷",
     fix_normals: "让所有面法线朝外一致",
     remove_small: "删掉体积过小的碎屑部件",
     resolve_self_intersection: "体素重网格，一次性消解穿插（会轻微圆化锐边）",
     rescale: "按推断的单位换算尺寸",
     thicken: "体素膨胀补厚薄壁",
   };
+  const has = (a) => S.repairActions.includes(a);
+  const row = (a) => `<label class="check-row ${has(a) ? "on" : ""}" data-act="${a}">
+      <input type="checkbox" ${has(a) ? "checked" : ""}>
+      <span>${ACT_LABEL[a]}</span><small>${hints[a]}</small>
+    </label>`;
+  const advSel = ADV.filter(has).length;
   stage.innerHTML = `
     ${guideOf("repair")}
     <div class="block">
-      <div class="block-head"><div><div class="block-title">选择修复动作</div>
-        <div class="block-sub">执行时会按拓扑依赖自动排序，不用自己排</div></div></div>
+      <div class="block-head">
+        <div><div class="block-title">修复动作</div>
+          <div class="block-sub">核心三步通常全选；进阶项按需展开</div></div>
+        <button class="ghost small" id="btn-repair-rec" title="选中合并顶点 / 补洞 / 统一法线">一键推荐</button>
+      </div>
       <div class="block-body">
-        ${acts.map((a) => `<label class="check-row ${S.repairActions.includes(a) ? "on" : ""}" data-act="${a}">
-          <input type="checkbox" ${S.repairActions.includes(a) ? "checked" : ""}>
-          <span>${ACT_LABEL[a]}</span><small>${hints[a]}</small>
-        </label>`).join("")}
-        <div class="field-row" style="margin-top:14px">
-          <div class="field">
+        <div class="repair-group">
+          <div class="group-title">核心修复 <span class="group-tag">建议全选</span></div>
+          <div class="group-rows">${CORE.map(row).join("")}</div>
+        </div>
+        <details class="repair-adv" ${advSel ? "open" : ""}>
+          <summary>进阶修复 <span class="dim" id="adv-count">（${advSel}/${ADV.length} 已选）</span></summary>
+          <div class="group-rows">${ADV.map(row).join("")}</div>
+        </details>
+
+        <div class="repair-params">
+          <div class="field" data-param-for="remove_small" ${has("remove_small") ? "" : "hidden"}>
             <div class="field-top"><span class="field-label">碎屑阈值</span><span class="field-unit">占最大部件体积比</span></div>
             <input type="number" id="p-small" value="0.01" step="0.005" min="0.0001" max="0.5">
             <div class="field-help">体积小于最大连通体此比例的部件会被删除。0.01 表示 1%。</div>
           </div>
-          <div class="field">
+          <div class="field" data-param-for="thicken" ${has("thicken") ? "" : "hidden"}>
             <div class="field-top"><span class="field-label">加厚量</span><span class="field-unit">mm</span></div>
             <input type="number" id="p-thicken" value="0.5" step="0.1" min="0.1" max="5">
-            <div class="field-help">仅当勾选「加厚」时生效。体素法，锐边会轻微圆化。</div>
+            <div class="field-help">体素法，锐边会轻微圆化。</div>
+          </div>
+          <div class="field" data-param-for="rescale" ${has("rescale") ? "" : "hidden"}>
+            <div class="field-top"><span class="field-label">单位换算系数</span><span class="field-unit">×</span></div>
+            <input type="number" id="p-rescale" value="${S.rescaleFactor || 1}" step="0.001" min="0.001" max="1000">
+            <div class="field-help">英寸模型填 25.4，厘米模型填 10。</div>
           </div>
         </div>
-        <div class="field">
-          <div class="field-top"><span class="field-label">单位换算系数</span><span class="field-unit">×</span></div>
-          <input type="number" id="p-rescale" value="${S.rescaleFactor || 1}" step="0.001" min="0.001" max="1000">
-          <div class="field-help">仅当勾选「单位换算」时生效。英寸模型填 25.4，厘米模型填 10；从检测报告的换算按钮进来会自动填好。</div>
-        </div>
-        <div class="row" style="margin-top:6px">
+
+        <div class="row repair-actions-row">
           <button class="primary" id="btn-repair">执行修复（${S.repairActions.length} 个动作）</button>
-          <span class="dim" style="font-size:11px">修完会自动回到检测页复检</span>
+          <span class="dim" style="font-size:11px">修完自动复检，不再重复提示已修好的问题</span>
         </div>
       </div>
     </div>`;
 
+  const updateBtn = () => { $("#btn-repair").textContent = `执行修复（${S.repairActions.length} 个动作）`; };
+  const updateParams = () => {
+    $$("[data-param-for]", stage).forEach((el) => {
+      el.hidden = !S.repairActions.includes(el.dataset.paramFor);
+    });
+    const cnt = $("#adv-count");
+    if (cnt) cnt.textContent = `（${ADV.filter((x) => S.repairActions.includes(x)).length}/${ADV.length} 已选）`;
+  };
   $$("[data-act]", stage).forEach((el) => el.onclick = (e) => {
     e.preventDefault();
     const a = el.dataset.act;
@@ -1102,8 +1126,11 @@ function renderRepair(stage) {
     if (i >= 0) S.repairActions.splice(i, 1); else S.repairActions.push(a);
     el.classList.toggle("on", S.repairActions.includes(a));
     $("input", el).checked = S.repairActions.includes(a);
-    $("#btn-repair").textContent = `执行修复（${S.repairActions.length} 个动作）`;
+    updateBtn();
+    updateParams();
   });
+  const rec = $("#btn-repair-rec");
+  if (rec) rec.onclick = () => { S.repairActions = [...CORE]; render(); };
   $("#btn-repair").onclick = runRepair;
 }
 
@@ -2214,13 +2241,21 @@ async function runRepair() {
 async function afterRepair(j) {
   const p = await api(`/api/projects/${S.pid}`);
   S.project = p;
+  S.advice = null; // 修复后几何变了，旧建议作废，去建议页会按新几何重新生成
   await loadProjects();
   const b = j.result?.before, a = j.result?.after;
   if (b && a) {
     toast(`修复完成：面数 ${b.faces} → ${a.faces}，水密 ${b.is_watertight ? "是" : "否"} → ${a.is_watertight ? "是" : "否"}`);
   }
-  S.step = 1; renderSteps(); render();
-  runAnalyze();
+  S.step = 1; renderSteps();
+  if (j.result?.analysis) {
+    // 后端已在修复后复检，直接用新报告，避免「修完还说不水密」以及重复检测
+    S.analysis = j.result.analysis;
+    render();
+  } else {
+    render();
+    runAnalyze();
+  }
 }
 
 async function runProcess() {

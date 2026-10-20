@@ -533,3 +533,31 @@ kbd {
   .inspector { display: none; }
   .brand-sub { display: none; }
 }
+
+/* ---- 修复面板：分组 / 折叠 / 参数按需显示 ---- */
+.repair-group { margin-bottom: 12px; }
+.group-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 8px;
+}
+.group-tag { font-size: 10px; font-weight: 400; color: var(--accent); background: #14251c; padding: 1px 8px; border-radius: 9px; }
+.group-rows { display: flex; flex-direction: column; gap: 6px; }
+
+.repair-adv { border: 1px dashed var(--line); border-radius: 8px; padding: 0 10px; margin-bottom: 12px; }
+.repair-adv > summary {
+  cursor: pointer; padding: 10px 2px; font-size: 12px; color: var(--muted); list-style: none;
+}
+.repair-adv > summary::-webkit-details-marker { display: none; }
+.repair-adv > summary::before { content: "▸ "; color: var(--accent); }
+.repair-adv[open] > summary::before { content: "▾ "; }
+.repair-adv .group-rows { padding-bottom: 10px; }
+
+.repair-params { display: flex; flex-direction: column; gap: 12px; margin: 2px 0 6px; }
+.repair-params [data-param-for][hidden] { display: none !important; }
+
+.repair-actions-row { margin-top: 10px; align-items: center; }
+.repair-actions-row #btn-repair { font-size: 14px; padding: 9px 22px; }
+
+/* 图标降噪：复选框小一点、暗一点，别喧宾夺主 */
+.check-row input[type="checkbox"] { width: 13px; height: 13px; opacity: .7; }
+.check-row.on input[type="checkbox"] { opacity: 1; }

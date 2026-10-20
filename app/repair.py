@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-from . import analysis, config, meshio, store, voxelops
+from . import analysis, config, gpu, meshio, store, voxelops
 
 LABELS = {
     "merge_vertices": "合并重复顶点",
@@ -197,6 +197,209 @@ def fill_holes_manual(mesh, max_loop: int = 10000) -> tuple[trimesh.Trimesh, dic
     }
 
 
+def _vertex_adjacency(faces: np.ndarray, nverts: int) -> list[np.ndarray]:
+    """每个顶点的一环邻居（去重），用于给二次曲面拟合采样。"""
+    adj: list[set[int]] = [set() for _ in range(nverts)]
+    for tri in faces:
+        a, b, c = int(tri[0]), int(tri[1]), int(tri[2])
+        adj[a].update((b, c))
+        adj[b].update((a, c))
+        adj[c].update((a, b))
+    return [np.fromiter(s, dtype=np.int64) for s in adj]
+
+
+def _loop_normal(pts: np.ndarray) -> np.ndarray:
+    """环的平均法向（Newell 法）。"""
+    n = np.zeros(3)
+    for i in range(len(pts)):
+        a = pts[i]
+        b = pts[(i + 1) % len(pts)]
+        n[0] += (a[1] - b[1]) * (a[2] + b[2])
+        n[1] += (a[2] - b[2]) * (a[0] + b[0])
+        n[2] += (a[0] - b[0]) * (a[1] + b[1])
+    ln = np.linalg.norm(n)
+    return n / ln if ln > 1e-12 else np.array([0.0, 0.0, 1.0])
+
+
+def _subdivide_interior(verts, faces, boundary_edges, levels):
+    """只细分内部边、绝不动边界边 —— 否则会在补丁与实体之间留下 T 形接缝。
+
+    每次细分把每个三角形按「有几条内部边被打点」拆成 1/2/3/4 个子三角形，
+    边界边保持原样，补丁仍能与原网格严丝合缝地缝合。
+    """
+    verts = np.asarray(verts, dtype=np.float64).copy()
+    faces = np.asarray(faces, dtype=np.int64).copy()
+    for _ in range(max(0, int(levels))):
+        edge_mid: dict[tuple[int, int], int] = {}
+        for tri in faces:
+            for k in range(3):
+                a, b = int(tri[k]), int(tri[(k + 1) % 3])
+                key = (min(a, b), max(a, b))
+                if key in boundary_edges or key in edge_mid:
+                    continue
+                edge_mid[key] = len(verts)
+                verts = np.vstack([verts, (verts[a] + verts[b]) * 0.5])
+        new_faces: list[list[int]] = []
+        for tri in faces:
+            a, b, c = int(tri[0]), int(tri[1]), int(tri[2])
+            mab = edge_mid.get((min(a, b), max(a, b)))
+            mbc = edge_mid.get((min(b, c), max(b, c)))
+            mca = edge_mid.get((min(c, a), max(c, a)))
+            cnt = (mab is not None) + (mbc is not None) + (mca is not None)
+            if cnt == 0:
+                new_faces.append([a, b, c])
+            elif cnt == 1:
+                if mab is not None:
+                    new_faces += [[a, mab, c], [mab, b, c]]
+                elif mbc is not None:
+                    new_faces += [[b, mbc, a], [mbc, c, a]]
+                else:
+                    new_faces += [[c, mca, b], [mca, a, b]]
+            elif cnt == 2:
+                if mab is not None and mbc is not None:
+                    new_faces += [[mab, b, mbc], [a, mab, mbc], [a, mbc, c]]
+                elif mbc is not None and mca is not None:
+                    new_faces += [[mbc, c, mca], [b, mbc, mca], [b, mca, a]]
+                else:
+                    new_faces += [[mca, a, mab], [c, mca, mab], [c, mab, b]]
+            else:
+                new_faces += [[a, mab, mca], [mab, b, mbc], [mca, mbc, c], [mab, mbc, mca]]
+        faces = np.asarray(new_faces, dtype=np.int64)
+    return verts, faces
+
+
+def _fit_quadric(pts: np.ndarray, origin: np.ndarray, u: np.ndarray, v: np.ndarray, n: np.ndarray):
+    """在局部标架下拟合 z = a u² + b uv + c v² + d u + e v + f。"""
+    p = pts - origin
+    uu = p @ u
+    vv = p @ v
+    ww = p @ n
+    A = np.column_stack([uu * uu, uu * vv, vv * vv, uu, vv, np.ones_like(uu)])
+    coef, *_ = np.linalg.lstsq(A, ww, rcond=None)
+    return coef
+
+
+def _eval_quadric(coef: np.ndarray, uu: np.ndarray, vv: np.ndarray) -> np.ndarray:
+    return (coef[0] * uu * uu + coef[1] * uu * vv + coef[2] * vv * vv
+            + coef[3] * uu + coef[4] * vv + coef[5])
+
+
+def fill_holes_smooth(mesh, max_loop: int = 10000, levels: int = 2, smooth_iters: int = 12):
+    """曲率感知补洞：耳切定拓扑 → 内部细分加点 → 二次曲面拟合投影 → 拉普拉斯平滑（GPU）。
+
+    旧做法「平面耳切 + 直接缝合」在曲面上会补出一块平板，既凹进去又有明显棱线，
+    还会把洞口附近的网格拽变形。这里给补丁加内部顶点，按洞周围拟合出的二次曲面
+    把它们抬到正确高度，再用固定边界的拉普拉斯平滑收顺，补出来的面顺着原模型曲率走。
+    """
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    loops = boundary_loops(faces, len(verts))
+    if not loops:
+        return mesh, {"loops": 0, "added_faces": 0, "method": "smooth"}
+
+    adj = _vertex_adjacency(faces, len(verts))
+    V = verts.copy()
+    patches: list[np.ndarray] = []
+    added = 0
+    skipped = 0
+    for ring in loops:
+        if len(ring) < 3:
+            continue
+        if len(ring) > max_loop:
+            skipped += 1
+            continue
+        base = triangulate_loop(V, ring)  # 全局索引，且只用到环上顶点
+        if len(base) == 0:
+            continue
+        local_idx = {int(v): i for i, v in enumerate(ring)}
+        boundary_edges = set()
+        for i in range(len(ring)):
+            a = local_idx[int(ring[i])]
+            b = local_idx[int(ring[(i + 1) % len(ring)])]
+            boundary_edges.add((min(a, b), max(a, b)))
+        pv = V[ring].copy()
+        pf = np.asarray([[local_idx[int(x)] for x in tri] for tri in base], dtype=np.int64)
+        # 洞越大越需要细分（小洞平面补就够，细分反而增加无谓开销）
+        if len(ring) < 5:
+            lv = 0
+        elif len(ring) < 10:
+            lv = 1
+        elif len(ring) < 48:
+            lv = 2
+        else:
+            lv = 3
+        pv, pf = _subdivide_interior(pv, pf, boundary_edges, lv)
+        nr = len(ring)
+
+        # 拟合二次曲面：环点 + 一环邻居
+        ring_pts = V[ring]
+        neigh = []
+        for rv in ring:
+            for nb in adj[int(rv)][:8]:
+                if int(nb) not in local_idx:
+                    neigh.append(V[int(nb)])
+        sample = np.vstack([ring_pts] + ([np.asarray(neigh)] if neigh else []))
+        origin = ring_pts.mean(axis=0)
+        nrm = _loop_normal(ring_pts)
+        helper = np.array([1.0, 0, 0]) if abs(nrm[0]) < 0.9 else np.array([0, 1.0, 0])
+        u = np.cross(nrm, helper)
+        u /= np.linalg.norm(u)
+        v = np.cross(nrm, u)
+        coef = _fit_quadric(sample, origin, u, v, nrm)
+        # 防止病态拟合把补丁顶飞：z 限制在洞口尺度的 2 倍以内
+        span = float(np.linalg.norm(ring_pts - origin, axis=1).max()) or 1.0
+
+        interior = np.arange(nr, len(pv))
+        if len(interior):
+            p = pv[interior] - origin
+            uu = p @ u
+            vv = p @ v
+            zz = np.clip(_eval_quadric(coef, uu, vv), -2 * span, 2 * span)
+            pv[interior] = origin + np.outer(uu, u) + np.outer(vv, v) + np.outer(zz, nrm)
+
+        # 拉普拉斯平滑（边界固定）+ 每轮投影回曲面：只平滑不投影会把补丁拉塌，
+        # 只投影不平滑又会留下细分带来的锯齿，两者交替才既顺又贴合曲率。
+        if len(interior) and smooth_iters > 0:
+            edges = np.vstack([pf[:, [0, 1]], pf[:, [1, 2]], pf[:, [2, 0]]])
+            edges = np.unique(np.sort(edges, axis=1), axis=0)
+            fmask = np.zeros(len(pv), dtype=bool)
+            fmask[:nr] = True
+            rounds = max(1, int(smooth_iters) // 4)
+            for _ in range(rounds):
+                pv = gpu.smooth_laplacian(pv, edges, fmask, iters=4, lam=0.5)
+                p = pv[interior] - origin
+                uu = p @ u
+                vv = p @ v
+                zz = np.clip(_eval_quadric(coef, uu, vv), -2 * span, 2 * span)
+                pv[interior] = origin + np.outer(uu, u) + np.outer(vv, v) + np.outer(zz, nrm)
+
+        start = len(V)
+        V = np.vstack([V, pv[nr:]])
+        remap = np.empty(len(pv), dtype=np.int64)
+        remap[:nr] = ring
+        remap[nr:] = start + np.arange(len(pv) - nr)
+        patches.append(remap[pf])
+        added += len(pv) - nr
+
+    if not patches:
+        return mesh, {"loops": len(loops), "added_faces": 0, "skipped": skipped, "method": "smooth"}
+
+    all_faces = np.vstack([faces] + patches)
+    out = trimesh.Trimesh(vertices=V, faces=all_faces, process=True)
+    n_flip = 0
+    if not out.is_winding_consistent:
+        f2, n_flip = orient_consistent(np.asarray(out.faces))
+        out = trimesh.Trimesh(vertices=np.asarray(out.vertices), faces=f2, process=True)
+    return out, {
+        "loops": len(loops),
+        "added_faces": int(sum(len(p) for p in patches)),
+        "added_verts": added,
+        "skipped": skipped,
+        "winding_flipped_faces": n_flip,
+        "method": "smooth",
+    }
+
+
 def orient_consistent(faces: np.ndarray) -> tuple[np.ndarray, int]:
     """BFS 传播定向：相邻面共享边必须方向相反，否则翻转该面。
 
@@ -250,25 +453,47 @@ def act_fill_holes(mesh, params):
     h0 = analysis.edge_histogram(faces, len(verts))
     before = h0["boundary"]
     if before == 0:
-        return mesh, {"boundary_before": 0, "boundary_after": 0, "filled": False}
-    new_mesh, info = fill_holes_manual(mesh, int(params.get("max_loop", 10000)))
-    v2, f2 = np.asarray(new_mesh.vertices), np.asarray(new_mesh.faces)
-    h1 = analysis.edge_histogram(f2, len(v2))
-    after = h1["boundary"]
-    # 自检：没减少开放边、或者把非流形边搞多了，说明补坏了，回退
-    reverted = False
-    if after >= before:
-        reverted = True
-    elif h1["nonmanifold"] > h0["nonmanifold"] + 2:
-        reverted = True
-    if reverted:
-        info.update({"boundary_before": before, "boundary_after": before,
-                     "filled": False, "reverted": True,
-                     "revert_reason": f"补洞后开放边 {after}、非流形边 {h1['nonmanifold']}，判定补坏已回退"})
-        return mesh, info
-    info.update({"boundary_before": before, "boundary_after": after,
-                 "filled": True, "nonmanifold_after": h1["nonmanifold"]})
-    return new_mesh, info
+        return mesh, {"boundary_before": 0, "boundary_after": 0, "filled": False, "method": "none"}
+    max_loop = int(params.get("max_loop", 10000))
+
+    # 优先用曲率感知的平滑补洞；失败再退回旧的平面补丁
+    try:
+        smooth_mesh, info = fill_holes_smooth(
+            mesh, max_loop,
+            levels=int(params.get("fill_levels", 2)),
+            smooth_iters=int(params.get("fill_smooth", 12)),
+        )
+    except Exception as e:  # noqa: BLE001
+        smooth_mesh, info = mesh, {"method": "smooth_failed", "error": str(e)[:160]}
+
+    def _judge(m):
+        v = np.asarray(m.vertices)
+        f = np.asarray(m.faces)
+        h = analysis.edge_histogram(f, len(v))
+        return h
+
+    h1 = _judge(smooth_mesh)
+    ok = h1["boundary"] < before and h1["nonmanifold"] <= h0["nonmanifold"] + 2
+    if ok:
+        info.update({"boundary_before": before, "boundary_after": h1["boundary"],
+                     "filled": True, "nonmanifold_after": h1["nonmanifold"],
+                     "gpu": gpu.info()})
+        return smooth_mesh, info
+
+    # 平滑补洞没改善 → 退回平面耳切
+    planar_mesh, pinfo = fill_holes_manual(mesh, max_loop)
+    h2 = _judge(planar_mesh)
+    if h2["boundary"] < before:
+        pinfo.update({"boundary_before": before, "boundary_after": h2["boundary"],
+                      "filled": True, "nonmanifold_after": h2["nonmanifold"],
+                      "fallback": "planar", "gpu": gpu.info()})
+        return planar_mesh, pinfo
+
+    info.update({"boundary_before": before, "boundary_after": before,
+                 "filled": False, "reverted": True,
+                 "revert_reason": f"平滑/平面补洞后开放边仍为 {h1['boundary']}/{h2['boundary']}，未改善，已回退",
+                 "gpu": gpu.info()})
+    return mesh, info
 
 
 def act_fix_normals(mesh, params):
@@ -431,15 +656,28 @@ def run_job(ctx, params):
         applied.append({"action": name, "label": LABELS.get(name, name), "info": info})
         ctx.complete_step(name, info)
 
-    ctx.tick(0.92, "写入结果", "save")
+    ctx.tick(0.90, "写入结果", "save")
     out = config.OUTPUTS / f"{pid}_repaired_{int(time.time())}.stl"
     mesh.export(str(out))
     after = meshio.mesh_stats(mesh)
+
+    # 修复后立刻复检，并把旧建议作废 —— 否则建议页会拿着修复前的报告继续喊「不水密」
+    ctx.tick(0.94, "修复后复检", "analyze")
+    try:
+        report = analysis.analyze_mesh(mesh, out)
+    except Exception as e:  # noqa: BLE001
+        report = None
+        ctx.log(f"修复后复检失败（不影响修复结果）：{e}")
 
     store.add_history(
         pid, "repair", {"actions": actions},
         out, note="；".join(f"{a['label']}" for a in applied),
     )
+    if report is not None:
+        store.update(pid, analysis=report, advice=None)
+    else:
+        store.update(pid, advice=None)
     shutil.rmtree(tmpdir, ignore_errors=True)
     ctx.tick(1.0, "修复完成", "done")
-    return {"before": before, "after": after, "actions": applied, "output": str(out)}
+    return {"before": before, "after": after, "actions": applied,
+            "output": str(out), "analysis": report}
