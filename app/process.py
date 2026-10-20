@@ -146,13 +146,59 @@ def _bottom_sample_points(mesh, count: int, band: float = 4.0) -> np.ndarray:
     return low[picked, :2]
 
 
-def drill_holes(mesh, count: int, diameter: float, wall: float, points: list | None = None) -> tuple[trimesh.Trimesh, dict]:
+def _filter_thin_spots(mesh, xy: np.ndarray, min_wall: float) -> tuple[np.ndarray, int]:
+    """剔除壁厚不足的孔位。沿竖直方向测该位置上下两面之间的距离。"""
+    v = np.asarray(mesh.vertices, dtype=np.float64)
+    f = np.asarray(mesh.faces)
+    if len(xy) == 0:
+        return xy, 0
+    zmin, zmax = float(v[:, 2].min()), float(v[:, 2].max())
+    origins = np.c_[xy[:, 0], xy[:, 1], np.full(len(xy), zmax + 1.0)]
+    down = np.tile([0.0, 0.0, -1.0], (len(xy), 1))
+    try:
+        hits = analysis._raycast_nearest(v, f, origins, down, 1e-4, max_dist=(zmax - zmin) + 2.0)
+    except Exception:
+        return xy, 0
+    # 只量「外表面到第一个内表面」这一段。
+    # 不能继续往下量第二段：镂空件的第二段是空腔，一量就全是 0，孔全被拒。
+    # 这一段对实心件就是总厚度，对镂空件就是壳厚，两种情况都正好是开孔需要的深度。
+    keep = []
+    skipped = 0
+    for i in range(len(xy)):
+        if not np.isfinite(hits[i]):
+            skipped += 1
+            continue
+        ztop = zmax + 1.0 - float(hits[i])
+        o2 = np.array([[xy[i, 0], xy[i, 1], ztop - 0.05]])
+        d2 = analysis._raycast_nearest(v, f, o2, np.array([[0.0, 0, -1.0]]), 1e-4,
+                                       max_dist=(ztop - zmin) + 1.0)
+        if np.isfinite(d2[0]) and float(d2[0]) >= min_wall:
+            keep.append(i)
+        else:
+            skipped += 1
+    return xy[keep] if keep else xy[:0], skipped
+
+
+def drill_holes(mesh, count: int, diameter: float, wall: float, points: list | None = None,
+                min_wall: float | None = None) -> tuple[trimesh.Trimesh, dict]:
     if count <= 0 and not points:
         return mesh, {"holes": 0}
+    skipped_thin = 0
     if points:
         xy = np.asarray([[p[0], p[1]] for p in points], dtype=np.float64)
     else:
-        xy = _bottom_sample_points(mesh, count)
+        xy = _bottom_sample_points(mesh, count * 3)
+        # 孔必须打在够厚的地方：薄壁上一打就穿到侧面，孔变成豁口。
+        # 镂空件传 min_wall=0 跳过这层过滤——体素法的实际壳厚受 pitch 限制，
+        # 0.9mm 设定可能只做出 0.33mm，按名义壁厚卡会把所有位置都拒掉。
+        mw = min_wall if min_wall is not None else max(0.8, wall * 0.6)
+        if mw > 0:
+            xy, skipped_thin = _filter_thin_spots(mesh, xy, min_wall=mw)
+        if len(xy) > count:
+            sel = np.linspace(0, len(xy) - 1, count).astype(int)
+            xy = xy[sel]
+        if len(xy) == 0:
+            raise ValueError("底面找不到足够厚的位置开孔，请减小孔径或先加厚")
     v = np.asarray(mesh.vertices)
     zmin, zmax = float(v[:, 2].min()), float(v[:, 2].max())
     depth = min(max(wall * 3.0, 4.0), (zmax - zmin) * 0.6)
@@ -170,6 +216,7 @@ def drill_holes(mesh, count: int, diameter: float, wall: float, points: list | N
         "diameter": diameter,
         "depth": round(depth, 2),
         "positions": [[round(float(x), 2), round(float(y), 2)] for x, y in xy],
+        "skipped_thin": skipped_thin,
     }
 
 
@@ -345,6 +392,7 @@ def apply_pipeline(mesh, p: dict, progress=None) -> tuple[trimesh.Trimesh, trime
         mesh, dinfo = drill_holes(
             mesh, int(p["drain_holes"]), float(p["hole_diameter"]),
             float(p["wall_thickness"]), p.get("drain_hole_points") or None,
+            min_wall=0.0 if p["hollow"] else None,
         )
         report["drill"] = dinfo
 

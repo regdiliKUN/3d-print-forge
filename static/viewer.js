@@ -59,6 +59,7 @@ class Viewer {
     this.mat.clipShadows = false;
     this.boxHelper = null;
     this.markers = [];
+    this.labels = [];
 
     this.theta = 0.9; this.phi = 1.15; this.radius = 3; this.target = new T.Vector3();
     this._bind();
@@ -352,6 +353,52 @@ class Viewer {
     this.section.renderOrder = 10;
     this.group.add(this.section);
     return paths.length;
+  }
+
+  showDimensions() {
+    if (!this.ok || !this.box) return 0;
+    const T = this.THREE;
+    this.clearLabels();
+    const size = this.box.getSize(new T.Vector3());
+    const min = this.box.min, max = this.box.max;
+    const cx = (min.x + max.x) / 2, cy = (min.y + max.y) / 2, cz = (min.z + max.z) / 2;
+    const span = Math.max(size.x, size.y, size.z) || 1;
+    const mk = (text, pos, color) => {
+      const cv = document.createElement("canvas");
+      cv.width = 320; cv.height = 80;
+      const ctx = cv.getContext("2d");
+      ctx.fillStyle = "rgba(14,16,20,0.88)";
+      ctx.fillRect(0, 0, 320, 80);
+      ctx.strokeStyle = color; ctx.lineWidth = 3;
+      ctx.strokeRect(1.5, 1.5, 317, 77);
+      ctx.fillStyle = color;
+      ctx.font = "500 40px Consolas, monospace";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(text, 160, 42);
+      const tex = new T.CanvasTexture(cv);
+      tex.anisotropy = 4;
+      const sp = new T.Sprite(new T.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+      sp.position.set(pos[0], pos[1], pos[2]);
+      const w = span * 0.26;
+      sp.scale.set(w, w / 4, 1);
+      sp.renderOrder = 12;
+      this.group.add(sp);
+      this.labels.push(sp);
+    };
+    // 注意：group 旋转了 -90°，这里的坐标是**模型坐标**（Z 朝上）
+    mk(`X ${size.x.toFixed(1)}`, [cx, min.y, min.z], "#378add");
+    mk(`Y ${size.y.toFixed(1)}`, [max.x, cy, min.z], "#5dcaa5");
+    mk(`Z ${size.z.toFixed(1)}`, [max.x, min.y, cz], "#ef9f27");
+    return this.labels.length;
+  }
+
+  clearLabels() {
+    (this.labels || []).forEach((l) => {
+      this.group.remove(l);
+      l.material?.map?.dispose?.();
+      l.material?.dispose?.();
+    });
+    this.labels = [];
   }
 
   clearSection() {

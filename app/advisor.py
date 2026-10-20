@@ -96,10 +96,27 @@ def _geometry(project: dict) -> dict:
     }
 
 
+def _effective_volume(g: dict, hollow: bool, wall: float) -> tuple[float, str]:
+    """实际要固化的体积。
+
+    镂空后真正消耗的不是整件体积，而是「表面积 × 壳厚」——
+    直接拿实心体积算会把树脂用量高估好几倍。
+    """
+    solid = max(0.0, g["volume_mm3"])
+    if not hollow:
+        return solid, "实心体积"
+    shell = max(0.0, g["area_mm2"]) * max(0.0, wall)
+    # 表面积 × 壳厚 是壳体积的上界；球/柱这类件实际约为 0.75~0.9 倍
+    est = min(solid, shell * 0.85)
+    return est, f"表面积 {g['area_mm2']:.0f}mm² × 壳厚 {wall}mm × 0.85"
+
+
 def _estimate_cost(g: dict, process: str, layer_h: float, exposure: float | None,
-                   infill: float | None) -> dict:
+                   infill: float | None, hollow: bool = False,
+                   wall: float = 2.0) -> dict:
     """耗材与时长估算。数字是经验值，但推导过程可查，不是拍脑袋。"""
-    vol_cm3 = max(0.0, g["volume_mm3"]) / 1000.0
+    eff_vol, vol_basis = _effective_volume(g, hollow, wall)
+    vol_cm3 = max(0.0, eff_vol) / 1000.0
     height = max(0.0, g["height"])
     if process == "SLA":
         grams = vol_cm3 * 1.1  # 光敏树脂密度约 1.1 g/cm³
@@ -110,7 +127,9 @@ def _estimate_cost(g: dict, process: str, layer_h: float, exposure: float | None
             "grams": round(grams, 1),
             "hours": round(minutes / 60.0, 2),
             "layers": layers,
-            "basis": f"体积 {vol_cm3:.1f}cm³ × 1.1g/cm³；{layers} 层 × ({exposure or 3.0:.1f}s 曝光 + 6s 抬升) + 底层 10×30s",
+            "effective_volume_cm3": round(vol_cm3, 2),
+            "basis": (f"{vol_basis} → {vol_cm3:.1f}cm³ × 1.1g/cm³；"
+                      f"{layers} 层 × ({exposure or 3.0:.1f}s 曝光 + 6s 抬升) + 底层 10×30s"),
         }
     grams = vol_cm3 * 1.24 * (0.35 + (infill or 15) / 100.0 * 0.45)
     minutes = g["volume_mm3"] / 6.0 / 60.0  # 约 6mm³/s 有效挤出
@@ -118,7 +137,9 @@ def _estimate_cost(g: dict, process: str, layer_h: float, exposure: float | None
         "grams": round(grams, 1),
         "hours": round(minutes / 60.0, 2),
         "layers": int(height / max(layer_h, 0.01)) if height else 0,
-        "basis": f"体积 {vol_cm3:.1f}cm³ × 1.24g/cm³ × 填充系数；按 6mm³/s 有效挤出速率折算",
+        "effective_volume_cm3": round(vol_cm3, 2),
+        "basis": (f"{vol_basis} → {vol_cm3:.1f}cm³ × 1.24g/cm³ × 填充系数；"
+                  f"按 6mm³/s 有效挤出速率折算"),
     }
 
 
@@ -256,7 +277,10 @@ def recommend(project: dict, overrides: dict | None = None) -> dict:
     lh_val = next((p["value"] for p in params if p["key"] == "layer_height"), 0.05)
     exp_val = next((p["value"] for p in params if p["key"] == "exposure"), None)
     inf_val = next((p["value"] for p in params if p["key"] == "infill"), None)
-    cost = _estimate_cost(g, process, float(lh_val), exp_val, inf_val)
+    hollow_flag = next((p["value"] for p in params if p["key"] == "hollow"), False)
+    wall_val = next((p["value"] for p in params if p["key"] == "wall_thickness"), 2.0)
+    cost = _estimate_cost(g, process, float(lh_val), exp_val, inf_val,
+                          hollow=bool(hollow_flag), wall=float(wall_val or 2.0))
     params.append({
         "key": "cost", "label": "预估耗材", "unit": "",
         "value": f"{cost['grams']} g / {cost['hours']} h",

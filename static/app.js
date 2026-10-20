@@ -346,6 +346,7 @@ function renderInspect(stage) {
           <button class="ghost" id="btn-thick">壁厚热力</button>
           <button class="ghost" id="btn-over">悬垂热力</button>
           <button class="ghost" id="btn-box">包围盒</button>
+          <button class="ghost" id="btn-dims">尺寸标注</button>
           <button class="ghost" id="btn-grid">平台网格</button>
           <button class="ghost" id="btn-parts">部件分色</button>
           <button class="ghost" id="btn-normals">法线</button>
@@ -419,11 +420,25 @@ function renderInspect(stage) {
     const v = S.viewers.find((x) => x.el.id === "viewer");
     if (v) e.target.classList.toggle("on", v.toggleBox());
   };
+  $("#btn-dims").onclick = (e) => {
+    const v = S.viewers.find((x) => x.el.id === "viewer");
+    if (!v) return;
+    if (v.labels && v.labels.length) { v.clearLabels(); e.target.classList.remove("on"); }
+    else { const n = v.showDimensions(); e.target.classList.toggle("on", n > 0); }
+  };
   $("#clip-slider").oninput = (e) => {
     const t = +e.target.value / 100;
     const v = S.viewers.find((x) => x.el.id === "viewer");
-    if (v) v.setClip(t);
+    if (!v) return;
+    v.setClip(t);
     $("#clip-label").textContent = t >= 1 ? "关闭" : `剖切 ${(t * 100).toFixed(0)}%`;
+    // 剖开时在切面处画出截面轮廓——否则看到的只是一个空心壳
+    const bb = S.modelBBox;
+    if (t >= 1) { v.clearSection(); return; }
+    if (bb) {
+      const zmin = bb[0][2], zmax = bb[1][2];
+      loadSection(zmin + (zmax - zmin) * t, true);
+    }
   };
   $("#btn-heat-off").onclick = () => {
     const v = S.viewers.find((x) => x.el.id === "viewer");
@@ -1586,7 +1601,7 @@ function afterSplit(j) {
 }
 
 let sliceTimer = null;
-async function loadSection(z) {
+async function loadSection(z, silent) {
   clearTimeout(sliceTimer);
   sliceTimer = setTimeout(async () => {
     const v = S.viewers.find((x) => x.el.id === "viewer");
@@ -1594,6 +1609,7 @@ async function loadSection(z) {
     try {
       const d = await api(`/api/projects/${S.pid}/section?z=${z.toFixed(2)}`);
       const n = v.drawSection(d.paths || []);
+      if (silent) return;  // 剖切联动时只画线，不改切片滑块的标签
       $("#slice-label").textContent = `Z = ${d.z} mm · ${n} 条轮廓 · ${d.area} mm²`;
       $("#heat-legend").textContent = n
         ? `第 ${d.z}mm 层有 ${n} 条封闭轮廓，截面面积 ${d.area}mm²。多条轮廓说明这一层有内孔或空腔。`

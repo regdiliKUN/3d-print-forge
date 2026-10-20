@@ -258,6 +258,22 @@ def get_project(pid: str) -> dict:
     return p
 
 
+@app.post("/api/projects/{pid}/duplicate")
+def duplicate_project(pid: str) -> dict:
+    """克隆一个项目：同一个源文件，独立的处理历史。"""
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    src = Path(p.get("current") or p.get("source") or "")
+    if not src.exists():
+        raise HTTPException(404, "模型文件不存在")
+    new = store.create(f"{Path(p['name']).stem}_副本{src.suffix}", src)
+    store.update(new["id"], tags=list(p.get("tags") or []),
+                 favorite=bool(p.get("favorite")),
+                 analysis=p.get("analysis"), advice=p.get("advice"))
+    return store.get(new["id"]) or {}
+
+
 @app.patch("/api/projects/{pid}")
 def patch_project(pid: str, payload: dict = Body(...)) -> dict:
     """改名、收藏、打标签。只接受白名单字段，避免误改 current 之类。"""
@@ -976,6 +992,44 @@ def create_template(payload: dict = Body(...)) -> dict:
     items.append(tpl)
     _save_templates(items)
     return {"template": tpl}
+
+
+@app.get("/api/templates/export")
+def export_templates() -> Response:
+    items = _load_templates()
+    return Response(
+        json.dumps({"version": 1, "templates": items}, ensure_ascii=False, indent=2).encode("utf-8"),
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="templates.json"'},
+    )
+
+
+@app.post("/api/templates/import")
+def import_templates(payload: dict = Body(...)) -> dict:
+    """导入模板文件。同名模板加后缀，不覆盖已有配置。"""
+    incoming = payload.get("templates")
+    if not isinstance(incoming, list):
+        raise HTTPException(400, "需要 templates 数组")
+    items = _load_templates()
+    existing = {t.get("name") for t in items}
+    added = 0
+    for raw in incoming[:100]:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "未命名模板")[:60]
+        if name in existing:
+            name = f"{name} (导入)"
+        items.append({
+            "id": uuid.uuid4().hex[:8],
+            "name": name,
+            "created": datetime.now().isoformat(timespec="seconds"),
+            "params": raw.get("params") or {},
+            "advice": raw.get("advice") or {},
+        })
+        existing.add(name)
+        added += 1
+    _save_templates(items)
+    return {"ok": True, "added": added, "total": len(items)}
 
 
 @app.delete("/api/templates/{tid}")
