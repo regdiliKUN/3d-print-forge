@@ -5,7 +5,6 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
 import trimesh
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -81,6 +80,26 @@ def main() -> int:
         )
         check("悬垂热力图加载", "悬垂角" in page.inner_text("#heat-legend"))
         page.screenshot(path=str(SHOTS / "3_heat_overhang.png"))
+
+        # ---- 切片层预览
+        page.locator("#slice-slider").fill("50")
+        page.locator("#slice-slider").dispatch_event("input")
+        page.wait_for_function(
+            "() => (document.querySelector('#slice-label')?.textContent || '').includes('Z =')",
+            timeout=30000,
+        )
+        check("切片层预览", "Z =" in page.inner_text("#slice-label"),
+              page.inner_text("#slice-label"))
+        page.screenshot(path=str(SHOTS / "12_section.png"))
+
+        # ---- 色标
+        page.locator("#btn-thick").click()
+        page.wait_for_function(
+            "() => (document.querySelector('#heat-legend')?.textContent || '').includes('壁厚场')",
+            timeout=60000,
+        )
+        vis = page.locator("#heat-scale").is_visible()
+        check("热力图色标显示", vis)
 
         # ---- 剖切
         page.locator("#clip-slider").fill("55")

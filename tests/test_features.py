@@ -1,7 +1,6 @@
 """第二轮新功能测试：热力图、分件、版本对比、3MF、回滚。"""
 from __future__ import annotations
 
-import io
 import sys
 from pathlib import Path
 

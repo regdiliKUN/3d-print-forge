@@ -159,7 +159,6 @@ def test_batch_repairs_then_processes(live_projects):
 def test_batch_hollow_failure_is_attributed(live_projects, tmp_path):
     # 不水密的模型强行镂空，应归因到 process 阶段
     pid = live_projects[0]["id"]
-    proj = store.get(pid)
     broken = tmp_path / "broken.stl"
     m = trimesh.creation.box(extents=(20, 20, 20))
     m.update_faces(np.arange(len(m.faces)) != 0)

@@ -9,7 +9,6 @@ import traceback
 import uuid
 from collections import deque
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Callable
 
 from . import config
@@ -367,7 +366,6 @@ class JobManager:
         rt = config.get().runtime
         if rt.memory_limit_mb <= 0:
             return True
-        ctx = JobContext(job)
         while True:
             if job._cancel_evt.is_set():
                 return False

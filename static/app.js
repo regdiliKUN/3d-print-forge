@@ -25,6 +25,28 @@ const S = {
   batchSel: new Set(),
 };
 
+const PRESETS = {
+  figure: {
+    label: "手办（光固化）",
+    hint: "细层高、镂空省料、自动支撑",
+    proc: { decimate_ratio: 0.85, hollow: true, wall_thickness: 2.0, drain_holes: 2,
+            hole_diameter: 3.0, supports: "auto", overhang_deg: 45.0,
+            support_diameter: 1.0, support_spacing: 3.0, orient: true, scale: 1.0 },
+  },
+  fdm: {
+    label: "FDM 功能件",
+    hint: "不镂空、粗支撑、50° 悬垂",
+    proc: { decimate_ratio: 1.0, hollow: false, wall_thickness: 1.2, drain_holes: 0,
+            hole_diameter: 3.0, supports: "auto", overhang_deg: 50.0,
+            support_diameter: 1.6, support_spacing: 5.0, orient: true, scale: 1.0 },
+  },
+  proto: {
+    label: "快速验证",
+    hint: "重度减面、不加支撑，只看形状",
+    proc: { decimate_ratio: 0.5, hollow: false, supports: "none", orient: false, scale: 1.0 },
+  },
+};
+
 const SEV = { ok: "通过", info: "提示", warning: "警告", error: "严重" };
 const ACT_LABEL = {
   merge_vertices: "合并重复顶点", fill_holes: "补洞", fix_normals: "统一法线",
@@ -236,6 +258,17 @@ function renderInspect(stage) {
           <input type="range" id="clip-slider" min="0" max="100" value="100">
           <div class="field-help">沿 Z 轴拖动剖开模型，检查内部空腔、壁厚和有没有打穿。</div>
         </div>
+        <div class="field">
+          <div class="field-top"><span class="field-label">切片层预览</span>
+            <span class="field-unit" id="slice-label">关闭</span></div>
+          <input type="range" id="slice-slider" min="0" max="100" value="0">
+          <div class="field-help">拖动看每一层的真实截面轮廓，比剖切更适合检查内部结构和排液孔是否打通。</div>
+        </div>
+        <div id="heat-scale" class="heat-scale" style="display:none">
+          <span class="hs-label" id="hs-lo"></span>
+          <div class="hs-bar" id="hs-bar"></div>
+          <span class="hs-label" id="hs-hi"></span>
+        </div>
         <div class="dim" style="font-size:11px;margin-top:2px" id="heat-legend"></div>
       </div>
     </div>
@@ -279,10 +312,27 @@ function renderInspect(stage) {
     $("#btn-over").classList.remove("on");
     $("#btn-issues").classList.remove("on");
     $("#btn-sup").classList.remove("on");
+    $("#btn-parts").classList.remove("on");
+    $("#heat-scale").style.display = "none";
   };
   $("#btn-grid").onclick = (e) => {
     const v = S.viewers.find((x) => x.el.id === "viewer");
     if (v) e.target.classList.toggle("on", v.setGrid(!v.grid));
+  };
+  $("#slice-slider").oninput = (e) => {
+    const t = +e.target.value;
+    const v = S.viewers.find((x) => x.el.id === "viewer");
+    if (!v) return;
+    if (t <= 0) {
+      v.clearSection();
+      $("#slice-label").textContent = "关闭";
+      return;
+    }
+    const bb = S.modelBBox;
+    if (!bb) return;
+    const zmin = bb[0][2], zmax = bb[1][2];
+    const z = zmin + ((zmax - zmin) * t) / 100;
+    loadSection(z);
   };
   $("#btn-parts").onclick = () => loadHeat("components");
   $("#btn-normals").onclick = (e) => {
@@ -453,6 +503,19 @@ function renderProcess(stage) {
       <div class="block-body"><div class="viewer-wrap" id="proc-view" style="height:260px"></div></div>
     </div>
     <div class="block">
+      <div class="block-head"><div class="block-title">快速预设</div>
+        <div class="block-sub">一键套用常用组合，之后还能逐项微调</div></div>
+      <div class="block-body">
+        <div class="row">
+          ${Object.entries(PRESETS).map(([k, v]) =>
+            `<button class="ghost" data-preset="${k}" title="${v.hint}">${v.label}</button>`).join("")}
+          <span class="spacer"></span>
+          <select id="tpl-select" style="width:170px"><option value="">套用模板…</option></select>
+        </div>
+        <div class="field-help" style="margin-top:8px">预设会覆盖全部处理参数；模板是你在导出页存过的组合。</div>
+      </div>
+    </div>
+    <div class="block">
       <div class="block-head"><div class="block-title">处理参数</div>
         <div class="block-sub">改动会立即生效，执行前先看一眼上面</div></div>
       <div class="block-body">
@@ -553,6 +616,35 @@ function renderProcess(stage) {
   $("#p-sup").onchange = (e) => { S.proc.supports = e.target.value; };
   $("#p-hollow").onchange = (e) => { S.proc.hollow = e.target.checked; $("#row-hollow").classList.toggle("on", e.target.checked); };
   $("#p-orient").onchange = (e) => { S.proc.orient = e.target.checked; $("#row-orient").classList.toggle("on", e.target.checked); };
+  $$("[data-preset]", stage).forEach((el) => el.onclick = () => {
+    const p = PRESETS[el.dataset.preset];
+    if (!p) return;
+    Object.assign(S.proc, p.proc);
+    toast(`已套用「${p.label}」预设`);
+    render();
+  });
+  (async () => {
+    try {
+      const t = await api("/api/templates");
+      const sel = $("#tpl-select");
+      if (sel) {
+        for (const item of t.templates || []) {
+          const o = document.createElement("option");
+          o.value = item.id;
+          o.textContent = item.name;
+          sel.appendChild(o);
+        }
+        sel.onchange = async () => {
+          if (!sel.value) return;
+          const hit = (t.templates || []).find((x) => x.id === sel.value);
+          if (!hit) return;
+          Object.assign(S.proc, hit.params?.process || hit.params || {});
+          toast(`已套用模板「${hit.name}」`);
+          render();
+        };
+      }
+    } catch {}
+  })();
   $("#btn-proc").onclick = runProcess;
   $("#btn-pick-mode").onclick = (e) => {
     const v = S.viewers.find((x) => x.el.id === "proc-view");
@@ -668,6 +760,26 @@ function renderExport(stage) {
       </div>
     </div>` : ""}
     <div class="block">
+      <div class="block-head"><div class="block-title">姿态微调</div>
+        <div class="block-sub">按 90° 步进转，转完自动落到平台</div></div>
+      <div class="block-body">
+        <div class="row">
+          ${["x", "y", "z"].map((a) => `<button class="ghost" data-rot="${a}:-90">${a.toUpperCase()} −90°</button>
+            <button class="ghost" data-rot="${a}:90">${a.toUpperCase()} +90°</button>`).join("")}
+        </div>
+      </div>
+    </div>
+    <div class="block">
+      <div class="block-head"><div class="block-title">参数模板</div>
+        <div class="block-sub">把当前处理参数存成模板，下次一键套用</div></div>
+      <div class="block-body">
+        <div class="row">
+          <input type="text" id="tpl-name" placeholder="模板名，例如「手办 1/7」" style="flex:1;max-width:260px">
+          <button class="ghost" id="btn-save-tpl">存为模板</button>
+        </div>
+      </div>
+    </div>
+    <div class="block">
       <div class="block-head"><div class="block-title">分件</div>
         <div class="block-sub">超出成型尺寸时沿主轴切开，切面自动封盖，导出 zip</div></div>
       <div class="block-body">
@@ -704,6 +816,7 @@ function renderExport(stage) {
           <button class="ghost" data-dl="report">下载检测报告</button>
           <button class="ghost" data-dl="log">下载操作日志</button>
           <button class="ghost" data-dl="html">HTML 报告</button>
+          <button class="ghost" data-dl="slicer">切片参数配置</button>
         </div>
         <div class="field-help" style="margin-top:8px">3MF 保留单位和多体结构，比 STL 更适合交给现代切片软件。</div>
       </div>
@@ -738,6 +851,31 @@ function renderExport(stage) {
   $("#btn-split").onclick = runSplit;
   if ($("#btn-diff")) $("#btn-diff").onclick = loadDiff;
   if ($("#btn-undo")) $("#btn-undo").onclick = undoStep;
+  $$("[data-rot]", stage).forEach((el) => el.onclick = async () => {
+    const [axis, deg] = el.dataset.rot.split(":");
+    try {
+      const r = await api(`/api/projects/${S.pid}/rotate`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ axis, degrees: Number(deg) }),
+      });
+      toast(`已绕 ${axis.toUpperCase()} 轴转 ${deg}°，新尺寸 ${r.extents.map((x) => x.toFixed(1)).join("×")}mm`);
+      S.project = await api(`/api/projects/${S.pid}`);
+      await loadProjects();
+      render();
+    } catch (e) { toast("旋转失败：" + e.message, "err"); }
+  });
+  if ($("#btn-save-tpl")) $("#btn-save-tpl").onclick = async () => {
+    const name = ($("#tpl-name")?.value || "").trim();
+    if (!name) return toast("先给模板起个名字", "warn");
+    try {
+      await api("/api/templates", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, params: { process: S.proc } }),
+      });
+      toast(`模板「${name}」已保存，可在处理页套用`);
+      $("#tpl-name").value = "";
+    } catch (e) { toast("保存失败：" + e.message, "err"); }
+  };
   $$("[data-revert]", stage).forEach((el) => el.onclick = () => doRevert(+el.dataset.revert));
   $$("[data-dl]", stage).forEach((el) => el.onclick = () => {
     const kind = el.dataset.dl;
@@ -767,6 +905,7 @@ function mountViewer(elId, which = "current") {
     try {
       const m = await api(`/api/projects/${S.pid}/mesh?which=${which}&max_faces=40000`);
       v.setGeometry(m.vertices, m.indices);
+      if (m.bbox) S.modelBBox = m.bbox;
       const st = m.stats || {};
       const tag = document.getElementById(elId + "-stat");
       if (tag) {
@@ -1080,6 +1219,36 @@ function afterSplit(j) {
   toast(`分件完成：${res.pieces.length} 块`);
 }
 
+let sliceTimer = null;
+async function loadSection(z) {
+  clearTimeout(sliceTimer);
+  sliceTimer = setTimeout(async () => {
+    const v = S.viewers.find((x) => x.el.id === "viewer");
+    if (!v) return;
+    try {
+      const d = await api(`/api/projects/${S.pid}/section?z=${z.toFixed(2)}`);
+      const n = v.drawSection(d.paths || []);
+      $("#slice-label").textContent = `Z = ${d.z} mm · ${n} 条轮廓 · ${d.area} mm²`;
+      $("#heat-legend").textContent = n
+        ? `第 ${d.z}mm 层有 ${n} 条封闭轮廓，截面面积 ${d.area}mm²。多条轮廓说明这一层有内孔或空腔。`
+        : `${d.z}mm 高度处没有实体。`;
+    } catch (e) { toast("切片失败：" + e.message, "err"); }
+  }, 120);
+}
+
+function showHeatScale(kind, meta) {
+  const box = $("#heat-scale");
+  if (!box) return;
+  if (kind === "components") { box.style.display = "none"; return; }
+  const isT = kind === "thickness";
+  const hi = isT ? 1.5 : 90.0;
+  const unit = isT ? "mm" : "°";
+  $("#hs-lo").textContent = `0${unit}`;
+  $("#hs-hi").textContent = `${hi}${unit}`;
+  $("#hs-bar").style.background = "linear-gradient(90deg,#ff1f1f,#ffbf00,#22e022)";
+  box.style.display = "flex";
+}
+
 async function loadIssues() {
   const v = S.viewers.find((x) => x.el.id === "viewer");
   if (!v) return toast("预览还没准备好", "warn");
@@ -1148,6 +1317,7 @@ async function loadHeat(kind) {
         ? `壁厚场 ${meta.min ?? "-"}–${meta.max ?? "-"} mm，P5 = ${meta.p5 ?? "-"} mm。颜色按 0–1.5mm 映射，红=打不出来，橙=偏薄，绿=安全。`
         : `悬垂角 ${meta.min ?? "-"}–${meta.max ?? "-"}°，阈值 ${meta.threshold ?? 45}°。颜色按 0–90° 映射，红=必须加支撑。`;
     }
+    showHeatScale(kind, meta);
     $("#btn-thick").classList.toggle("on", kind === "thickness");
     $("#btn-over").classList.toggle("on", kind === "overhang");
     $("#btn-parts").classList.toggle("on", kind === "components");
@@ -1225,6 +1395,13 @@ async function afterBatch(j) {
   const fails = (rep.items || []).filter((x) => x.status === "failed");
   await loadProjects();
   renderSteps(); render();
+  const q = $("#queue");
+  if (q && rep.items) {
+    q.insertAdjacentHTML("afterbegin",
+      `<div class="job-card"><div class="job-top"><span class="job-title">批量结果</span></div>
+       <div class="job-msg">${rep.ok}/${rep.total} 成功</div>
+       <div class="job-ops"><a href="/api/batch/report.csv" style="font-size:10px;padding:2px 7px;border:1px solid var(--line);border-radius:4px;color:var(--muted)">导出 CSV</a></div></div>`);
+  }
   if (fails.length) {
     toast(`批量完成 ${rep.ok}/${rep.total}，${fails.length} 个失败`, "warn");
     fails.slice(0, 4).forEach((f) => toast(`${f.name} · ${f.stage}：${f.error}`, "err"));

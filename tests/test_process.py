@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app import analysis, meshio, process, repair, voxelops  # noqa: E402
+from app import analysis, process, repair, voxelops  # noqa: E402
 
 
 def _sphere(r=15, sub=2):
@@ -99,7 +99,7 @@ def test_no_supports_on_flat_box():
 def test_auto_orient_lands_on_platform():
     m = _sphere(12, 2)
     m.apply_translation([0, 0, 30])
-    out, info = auto = process.auto_orient(m, 45.0)
+    out, info = process.auto_orient(m, 45.0)
     assert abs(float(out.bounds[0][2])) < 1e-6
     assert "chosen" in info
     assert len(info["candidates"]) == 6

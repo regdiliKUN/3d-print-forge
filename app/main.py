@@ -10,18 +10,16 @@ import io
 import json
 import logging
 import re
-import shutil
 import time as _time
 import uuid
 import uuid as _uuid
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any
 
 from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import config, jobs, store
@@ -380,6 +378,84 @@ def split_project(pid: str, payload: dict = Body(...)) -> dict:
     return _spawn("split", f"分件 {p['name']}", payload, split_mod.run_job, pid)
 
 
+@app.get("/api/projects/{pid}/section")
+def project_section(pid: str, z: float = Query(..., ge=-1e6, le=1e6)) -> dict:
+    """指定高度的截面轮廓，前端画成线框——用来逐层检查内部结构。"""
+    from . import meshio
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    path = p.get("current") or p.get("source")
+    if not path or not Path(path).exists():
+        raise HTTPException(404, "模型文件不存在")
+    mesh = meshio.load_mesh(Path(path), preview_faces=120000)
+    try:
+        sec = mesh.section(plane_origin=[0.0, 0.0, z], plane_normal=[0.0, 0.0, 1.0])
+    except Exception as e:
+        raise HTTPException(500, f"切片失败：{e}") from e
+    if sec is None:
+        return {"z": z, "paths": [], "count": 0, "area": 0.0}
+    paths: list[list[list[float]]] = []
+    try:
+        for ent in sec.entities:
+            pts = sec.vertices[ent.points]
+            if len(pts) >= 2:
+                paths.append([[round(float(q), 2) for q in row] for row in pts])
+    except Exception:
+        pass
+    area = 0.0
+    try:
+        # Path3D 没有直接的面积属性，投影到平面后用多边形面积求和
+        planar, _ = sec.to_planar()
+        area = round(float(sum(poly.area for poly in planar.polygons_full)), 2)
+    except Exception:
+        pass
+    bounds = mesh.bounds
+    return {
+        "z": round(float(z), 2),
+        "paths": paths[:300],
+        "count": len(paths),
+        "area": area,
+        "zmin": round(float(bounds[0][2]), 2),
+        "zmax": round(float(bounds[1][2]), 2),
+    }
+
+
+@app.post("/api/projects/{pid}/rotate")
+def rotate_project(pid: str, payload: dict = Body(...)) -> dict:
+    """按轴旋转指定角度，用于手动微调姿态。"""
+    import numpy as np
+    import trimesh
+
+    from . import meshio
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    path = p.get("current") or p.get("source")
+    if not path or not Path(path).exists():
+        raise HTTPException(404, "模型文件不存在")
+    axis = str(payload.get("axis", "z")).lower()
+    deg = float(payload.get("degrees", 90))
+    vec = {"x": [1, 0, 0], "y": [0, 1, 0], "z": [0, 0, 1]}.get(axis)
+    if vec is None:
+        raise HTTPException(400, "axis 只能是 x / y / z")
+    mesh = meshio.load_mesh(Path(path))
+    T = trimesh.transformations.rotation_matrix(np.radians(deg), vec)
+    mesh.apply_transform(T)
+    mesh.apply_translation([0, 0, -float(mesh.bounds[0][2])])
+    out = config.OUTPUTS / f"{pid}_rot_{int(_time.time())}.stl"
+    mesh.export(str(out))
+    store.add_history(pid, "rotate", {"axis": axis, "degrees": deg}, out,
+                      note=f"绕 {axis.upper()} 轴转 {deg}°")
+    return {
+        "ok": True,
+        "output": str(out),
+        "extents": [round(float(x), 2) for x in mesh.extents],
+    }
+
+
 @app.get("/api/projects/{pid}/issues")
 def project_issues(pid: str) -> dict:
     """把检测出的问题定位到 3D 坐标，前端直接打点。"""
@@ -711,6 +787,40 @@ def batch(payload: dict = Body(...)) -> dict:
     return _spawn("batch", f"批量处理 {len(ids)} 个模型", payload, batch_mod.run_job, None)
 
 
+@app.get("/api/batch/report.csv")
+def batch_report_csv() -> Response:
+    """批量结果导出成 CSV，方便贴到表格里逐条排查。"""
+    import csv as _csv
+    import io as _io
+
+    f = config.STATE / "batch_report.json"
+    if not f.exists():
+        raise HTTPException(404, "还没有批量结果")
+    try:
+        rep = json.loads(f.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(500, f"批量报告损坏：{e}") from e
+    buf = _io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(["项目", "状态", "阶段", "面数", "输出", "错误", "警告"])
+    for it in rep.get("items") or []:
+        w.writerow([
+            it.get("name", ""),
+            it.get("status", ""),
+            it.get("stage", ""),
+            it.get("faces", ""),
+            Path(it.get("output", "")).name if it.get("output") else "",
+            it.get("error", ""),
+            " | ".join(it.get("warnings") or []),
+        ])
+    body = "\ufeff" + buf.getvalue()  # BOM，Excel 打开不乱码
+    return Response(
+        body.encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="batch_report.csv"'},
+    )
+
+
 @app.get("/api/batch/report")
 def batch_report() -> dict:
     p = config.STATE / "batch_report.json"
@@ -724,7 +834,7 @@ def batch_report() -> dict:
 
 # ---------------------------------------------------------------- 导出
 @app.get("/api/projects/{pid}/download")
-def download(pid: str, kind: str = Query("stl", pattern="^(stl|3mf|config|log|report)$")) -> Response:
+def download(pid: str, kind: str = Query("stl", pattern="^(stl|3mf|config|log|report|slicer)$")) -> Response:
     p = store.get(pid)
     if not p:
         raise HTTPException(404, "项目不存在")
@@ -749,6 +859,41 @@ def download(pid: str, kind: str = Query("stl", pattern="^(stl|3mf|config|log|re
             buf.getvalue(),
             media_type="model/3mf",
             headers={"Content-Disposition": f'attachment; filename="{Path(p["name"]).stem}.3mf"'},
+        )
+    if kind == "slicer":
+        from . import advisor
+
+        adv = advisor.recommend(p)
+        g = adv.get("geometry") or {}
+        kv = {x["key"]: x["value"] for x in (adv.get("params") or [])}
+        cfg = {
+            "_comment": "通用切片参数配置，字段名对齐常见光固化/FDM 切片器。导入前请按机型微调。",
+            "process": adv.get("process"),
+            "printer": adv.get("printer_name"),
+            "material": kv.get("material"),
+            "model": {
+                "file": Path(p.get("current") or p["source"]).name,
+                "size_mm": g.get("extents"),
+                "volume_cm3": round((g.get("volume_mm3") or 0) / 1000, 2),
+                "watertight": g.get("watertight"),
+            },
+            "params": {
+                "layer_height_mm": kv.get("layer_height"),
+                "wall_thickness_mm": kv.get("wall_thickness"),
+                "infill_percent": kv.get("infill"),
+                "exposure_time_s": kv.get("exposure"),
+                "nozzle_temp_c": kv.get("nozzle_temp"),
+                "bed_temp_c": kv.get("bed_temp"),
+                "supports": kv.get("supports"),
+                "hollow": kv.get("hollow"),
+            },
+            "estimate": adv.get("cost"),
+            "warnings": adv.get("warnings") or [],
+        }
+        return Response(
+            json.dumps(cfg, ensure_ascii=False, indent=2).encode("utf-8"),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{Path(p["name"]).stem}_slicer.json"'},
         )
     if kind == "config":
         from . import advisor

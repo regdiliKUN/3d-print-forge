@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import jobs, store  # noqa: E402
+from app import jobs  # noqa: E402
 from app.main import app  # noqa: E402
 
 PASS: list[str] = []
@@ -225,7 +225,7 @@ def run() -> int:
         j2 = wait_job(client, jb2.id, timeout=20)
         check("首次执行失败", j2["status"] == "failed")
         client.post(f"/api/jobs/{jb2.id}/resume")
-        j3 = wait_job(client, jb2.id, timeout=20)
+        wait_job(client, jb2.id, timeout=20)
         check("续跑复用了已完成步骤", runs["count"] == 2 and runs["resumed"],
               f"执行 {runs['count']} 次，命中断点={runs['resumed']}")
 

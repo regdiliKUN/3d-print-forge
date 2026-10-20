@@ -172,9 +172,6 @@ def recommend(project: dict, overrides: dict | None = None) -> dict:
         })
         # 壁厚 / 镂空
         if g["volume_mm3"] > 50_000:
-            saved_pct = 0.0
-            if g["volume_mm3"] > 0:
-                saved_pct = (1 - ((g["max_dim"] ** 3) * 0.15) / g["volume_mm3"]) * 100
             params.append({
                 "key": "hollow", "label": "镂空", "value": True, "unit": "",
                 "reason": f"体积 {g['volume_mm3'] / 1000:.1f}cm³，实心打印耗树脂多、收缩应力大。建议壳厚 2.0mm 并开 2 个 φ3mm 排液孔。",

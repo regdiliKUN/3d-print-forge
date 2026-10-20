@@ -9,7 +9,6 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import numpy as np
 import trimesh
 
 from . import config, meshio, store

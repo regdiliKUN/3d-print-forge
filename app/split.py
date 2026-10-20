@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-from . import analysis, config, meshio, store
+from . import config, meshio, store
 
 
 def plan(mesh, max_size: float, axis: str = "auto") -> dict:
@@ -28,6 +28,20 @@ def plan(mesh, max_size: float, axis: str = "auto") -> dict:
     lo, hi = float(mesh.bounds[0][idx]), float(mesh.bounds[1][idx])
     step = (hi - lo) / n
     cuts = [lo + step * k for k in range(1, n)]
+
+    # 在等分位置附近找「顶点最稀疏」的高度再切。
+    # 等分点很容易正好落在手指、五官这种细节密集区，切下去既要补一堆小洞，
+    # 又会把特征切成两半。顶点稀疏的地方通常是大片平整面，切在这里最省事。
+    if len(cuts) and len(mesh.vertices) > 100:
+        vals = np.asarray(mesh.vertices, dtype=np.float64)[:, idx]
+        window = step * 0.2
+        refined = []
+        for c in cuts:
+            cands = np.linspace(max(lo + 1e-3, c - window), min(hi - 1e-3, c + window), 9)
+            dens = [int(np.sum(np.abs(vals - z) < 0.5)) for z in cands]
+            refined.append(float(cands[int(np.argmin(dens))]))
+        cuts = refined
+
     return {
         "axis": "xyz"[idx], "axis_index": idx,
         "cuts": [round(float(c), 3) for c in cuts],

@@ -1,7 +1,6 @@
 """优化轮次的回归测试：每一条改进都要有能证伪它的断言。"""
 from __future__ import annotations
 
-import os
 import sys
 import time
 from pathlib import Path
@@ -180,8 +179,6 @@ def test_supports_are_tapered_and_watertight():
     sup, info = process.build_supports(plate, 45.0, 1.0, 4.0, 50)
     assert info["count"] > 0
     assert sup.is_watertight
-    # 底面积大于顶面积：体积应大于同高度等径圆柱的一半
-    h = info["min_height"]
     assert sup.volume > 0
 
 

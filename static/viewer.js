@@ -330,6 +330,38 @@ class Viewer {
     }
   }
 
+  drawSection(paths) {
+    if (!this.ok) return 0;
+    const T = this.THREE;
+    this.clearSection();
+    if (!paths || !paths.length) return 0;
+    const pts = [];
+    for (const path of paths) {
+      for (let i = 1; i < path.length; i++) {
+        pts.push(path[i - 1][0], path[i - 1][1], path[i - 1][2],
+                 path[i][0], path[i][1], path[i][2]);
+      }
+    }
+    if (!pts.length) return 0;
+    const g = new T.BufferGeometry();
+    g.setAttribute("position", new T.Float32BufferAttribute(pts, 3));
+    // depthTest 关掉：截面轮廓在实体内部，不关会被模型表面完全挡住
+    this.section = new T.LineSegments(g, new T.LineBasicMaterial({
+      color: 0x5dcaa5, depthTest: false, transparent: true, opacity: 0.95,
+    }));
+    this.section.renderOrder = 10;
+    this.group.add(this.section);
+    return paths.length;
+  }
+
+  clearSection() {
+    if (this.section) {
+      this.group.remove(this.section);
+      this.section.geometry?.dispose?.();
+      this.section = null;
+    }
+  }
+
   clearGrid() {
     if (this.grid) {
       this.scene.remove(this.grid);
