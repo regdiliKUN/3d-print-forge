@@ -300,7 +300,7 @@ def project_mesh(
 @app.get("/api/projects/{pid}/heatmap")
 def project_heatmap(
     pid: str,
-    kind: str = Query("thickness", pattern="^(thickness|overhang)$"),
+    kind: str = Query("thickness", pattern="^(thickness|overhang|components)$"),
     max_faces: int = Query(0, ge=0, le=500000),
 ) -> dict:
     """逐顶点标量场，前端用顶点色渲染成热力图。"""
@@ -316,7 +316,12 @@ def project_heatmap(
         raise HTTPException(404, "模型文件不存在")
     limit = max_faces or config.get().runtime.preview_faces
     mesh = meshio.load_mesh(Path(path), preview_faces=limit)
-    field = analysis.thickness_field(mesh) if kind == "thickness" else analysis.overhang_field(mesh)
+    if kind == "thickness":
+        field = analysis.thickness_field(mesh)
+    elif kind == "overhang":
+        field = analysis.overhang_field(mesh)
+    else:
+        field = analysis.component_field(mesh)
     v = np.ascontiguousarray(mesh.vertices, np.float32)
     f = np.ascontiguousarray(mesh.faces, np.uint32)
     vals = np.ascontiguousarray(np.asarray(field.get("values") or [], dtype=np.float32))
@@ -375,6 +380,99 @@ def split_project(pid: str, payload: dict = Body(...)) -> dict:
     return _spawn("split", f"分件 {p['name']}", payload, split_mod.run_job, pid)
 
 
+@app.get("/api/projects/{pid}/issues")
+def project_issues(pid: str) -> dict:
+    """把检测出的问题定位到 3D 坐标，前端直接打点。"""
+    import numpy as np
+
+    from . import analysis, meshio, repair
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    path = p.get("current") or p.get("source")
+    if not path or not Path(path).exists():
+        raise HTTPException(404, "模型文件不存在")
+    mesh = meshio.load_mesh(Path(path), preview_faces=60000)
+    v = np.asarray(mesh.vertices, dtype=np.float64)
+    f = np.asarray(mesh.faces)
+
+    holes: list = []
+    try:
+        for ring in repair.boundary_loops(f, len(v)):
+            holes.append([round(float(x), 2) for x in v[ring].mean(axis=0)])
+    except Exception:
+        pass
+
+    self_int: list = []
+    try:
+        res = analysis.find_self_intersections(v, f)
+        if res.get("pairs"):
+            pr = np.asarray(res["pairs"])
+            centers = v[f[pr[:, 0]]].mean(axis=1)
+            self_int = [[round(float(x), 2) for x in c] for c in centers[:150]]
+    except Exception:
+        pass
+
+    debris: list = []
+    try:
+        n, labels = analysis.union_components(f, len(v))
+        if n > 1:
+            areas = analysis.tri_areas(v, f)
+            comp = np.array([areas[labels == c].sum() for c in range(n)])
+            mx = float(comp.max())
+            for c in range(n):
+                if comp[c] < mx * 0.01:
+                    debris.append([round(float(x), 2) for x in v[f[labels == c]].reshape(-1, 3).mean(axis=0)])
+    except Exception:
+        pass
+
+    return {
+        "holes": holes,
+        "self_intersection": self_int,
+        "debris": debris,
+        "counts": {"holes": len(holes), "self_intersection": len(self_int), "debris": len(debris)},
+    }
+
+
+@app.post("/api/projects/{pid}/preview-supports")
+def preview_supports(pid: str, payload: dict = Body(default={})) -> dict:
+    """只算支撑位置，不改模型——让用户先看清楚支撑会打在哪。"""
+    from . import meshio, process
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    path = p.get("current") or p.get("source")
+    if not path or not Path(path).exists():
+        raise HTTPException(404, "模型文件不存在")
+    mesh = meshio.load_mesh(Path(path), preview_faces=80000)
+    try:
+        _, info = process.build_supports(
+            mesh,
+            float(payload.get("overhang_deg", 45.0)),
+            float(payload.get("diameter", 1.0)),
+            float(payload.get("spacing", 3.0)),
+            400,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"支撑计算失败：{e}") from e
+    return {
+        "segments": info.get("segments", []),
+        "count": info.get("count", 0),
+        "note": info.get("note", ""),
+        "min_height": info.get("min_height"),
+        "max_height": info.get("max_height"),
+    }
+
+
+@app.post("/api/projects/{pid}/pack")
+def pack_models(pid: str, payload: dict = Body(...)) -> dict:
+    from . import pack as pack_mod
+
+    return _spawn("pack", "拼盘排版", payload, pack_mod.run_job, pid)
+
+
 @app.get("/api/projects/{pid}/diff")
 def project_diff(pid: str, tol: float = Query(0.05, ge=0.0, le=10.0)) -> dict:
     from . import compare
@@ -411,6 +509,108 @@ def project_revert(pid: str, payload: dict = Body(default={})) -> dict:
     store.update(pid, current=target)
     store.add_history(pid, "revert", {"index": idx}, Path(target), note=f"回滚到 {label}")
     return {"ok": True, "current": target, "label": label}
+
+
+SEV_COLOR = {"ok": "#5dcaa5", "info": "#378add", "warning": "#ef9f27", "error": "#e24b4a"}
+SEV_LABEL = {"ok": "通过", "info": "提示", "warning": "警告", "error": "严重"}
+
+
+def _build_report_html(p: dict) -> str:
+    """自包含 HTML 报告：样式内联，不依赖任何外部资源，直接发出去就能看。"""
+    import html as _html
+
+    rep = p.get("analysis") or {}
+    items = rep.get("items") or []
+    summary = rep.get("summary") or {}
+    stats = rep.get("stats") or {}
+    adv = p.get("advice") or {}
+    hist = p.get("history") or []
+    esc = _html.escape
+
+    rows = "".join(
+        f'<tr><td><span class="dot" style="background:{SEV_COLOR.get(it.get("severity"), "#888")}"></span>'
+        f'{esc(str(it.get("name")))}</td>'
+        f'<td class="sev">{SEV_LABEL.get(it.get("severity"), it.get("severity"))}</td>'
+        f'<td>{esc(str(it.get("message")))}</td></tr>'
+        for it in items
+    ) or '<tr><td colspan="3" class="muted">还没有检测结果</td></tr>'
+
+    params = "".join(
+        f'<tr><td>{esc(str(x.get("label")))}</td>'
+        f'<td class="val">{esc(str(x.get("value")))} {esc(str(x.get("unit") or ""))}</td>'
+        f'<td class="muted">{esc(str(x.get("reason")))}</td></tr>'
+        for x in (adv.get("params") or [])
+    ) or '<tr><td colspan="3" class="muted">还没有参数建议</td></tr>'
+
+    hist_rows = "".join(
+        f'<tr><td class="mono">{esc(str(h.get("at", ""))[:19].replace("T", " "))}</td>'
+        f'<td>{esc(str(h.get("action")))}</td><td class="muted">{esc(str(h.get("note") or ""))}</td></tr>'
+        for h in hist
+    ) or '<tr><td colspan="3" class="muted">还没有操作记录</td></tr>'
+
+    warns = "".join(f"<li>{esc(str(w))}</li>" for w in (adv.get("warnings") or []))
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<title>{esc(str(p.get("name")))} · 处理报告</title>
+<style>
+body{{background:#0e1014;color:#e6e9ef;font:14px/1.7 "Segoe UI","PingFang SC",system-ui,sans-serif;margin:0;padding:40px 24px}}
+.wrap{{max-width:980px;margin:0 auto}}
+h1{{font-size:22px;font-weight:500;margin:0 0 6px}}
+h2{{font-size:15px;font-weight:500;margin:32px 0 12px;padding-bottom:8px;border-bottom:1px solid #262b38}}
+.sub{{color:#8b93a5;font-size:12px;margin-bottom:24px}}
+table{{width:100%;border-collapse:collapse;font-size:13px}}
+th{{text-align:left;color:#8b93a5;font-weight:400;font-size:12px;padding:8px 10px;border-bottom:1px solid #262b38}}
+td{{padding:9px 10px;border-bottom:1px solid #1f2430;vertical-align:top}}
+.dot{{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px}}
+.sev{{white-space:nowrap;color:#8b93a5}}
+.val{{color:#5dcaa5;font-family:Consolas,monospace;white-space:nowrap}}
+.mono{{font-family:Consolas,monospace;font-size:12px;color:#8b93a5}}
+.muted{{color:#8b93a5}}
+.cards{{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px}}
+.card{{background:#151821;border:1px solid #262b38;border-radius:8px;padding:12px 16px;min-width:130px}}
+.card b{{display:block;font-size:18px;font-weight:500;color:#5dcaa5;font-family:Consolas,monospace}}
+.card span{{font-size:11px;color:#8b93a5}}
+.warn{{background:#1e1710;border:1px solid #4a3410;border-radius:8px;padding:12px 18px;color:#e8c48a;font-size:13px}}
+ul{{margin:0;padding-left:20px}}
+footer{{margin-top:40px;color:#5f6675;font-size:11px;border-top:1px solid #262b38;padding-top:12px}}
+</style></head><body><div class="wrap">
+<h1>{esc(str(p.get("name")))}</h1>
+<div class="sub">处理报告 · 生成于 {datetime.now().strftime("%Y-%m-%d %H:%M")} · 项目 {esc(str(p.get("id")))}</div>
+
+<div class="cards">
+  <div class="card"><b>{stats.get("faces", 0):,}</b><span>面数</span></div>
+  <div class="card"><b>{float(stats.get("volume_mm3") or 0) / 1000:.1f}</b><span>体积 cm³</span></div>
+  <div class="card"><b>{"是" if stats.get("is_watertight") else "否"}</b><span>水密</span></div>
+  <div class="card"><b>{summary.get("counts", {}).get("error", 0)}</b><span>严重项</span></div>
+  <div class="card"><b>{len(hist)}</b><span>操作次数</span></div>
+</div>
+
+<h2>检测报告</h2>
+<table><tr><th>项目</th><th>结论</th><th>说明</th></tr>{rows}</table>
+
+<h2>推荐参数</h2>
+<table><tr><th>参数</th><th>推荐值</th><th>依据</th></tr>{params}</table>
+{f'<div class="warn" style="margin-top:16px"><ul>{warns}</ul></div>' if warns else ""}
+
+<h2>操作历史</h2>
+<table><tr><th>时间</th><th>动作</th><th>说明</th></tr>{hist_rows}</table>
+
+<footer>3D Print Forge · 报告由本地工具生成，数据未上传</footer>
+</div></body></html>"""
+
+
+@app.get("/api/projects/{pid}/report.html")
+def report_html(pid: str) -> Response:
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    body = _build_report_html(p)
+    return Response(
+        body.encode("utf-8"),
+        media_type="text/html; charset=utf-8",
+        headers={"Content-Disposition": f'inline; filename="{Path(p["name"]).stem}_report.html"'},
+    )
 
 
 @app.get("/api/projects/{pid}/split/download")

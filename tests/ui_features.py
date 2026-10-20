@@ -92,12 +92,44 @@ def main() -> int:
         page.locator("#clip-slider").fill("100")
         page.locator("#clip-slider").dispatch_event("input")
 
-        # ---- 包围盒
+        # ---- 包围盒 + 平台网格
         page.locator("#btn-box").click()
+        page.locator("#btn-grid").click()
         time.sleep(0.6)
-        on = "on" in (page.locator("#btn-box").get_attribute("class") or "")
-        check("包围盒开关", on)
+        on_box = "on" in (page.locator("#btn-box").get_attribute("class") or "")
+        on_grid = "on" in (page.locator("#btn-grid").get_attribute("class") or "")
+        check("包围盒开关", on_box)
+        check("平台网格开关", on_grid)
         page.screenshot(path=str(SHOTS / "5_bbox.png"))
+
+        # ---- 部件分色
+        page.locator("#btn-parts").click()
+        page.wait_for_function(
+            "() => (document.querySelector('#heat-legend')?.textContent || '').includes('部件')",
+            timeout=60000,
+        )
+        check("部件分色", "部件" in page.inner_text("#heat-legend"))
+        page.screenshot(path=str(SHOTS / "9_parts.png"))
+
+        # ---- 法线箭头
+        page.locator("#btn-normals").click()
+        page.wait_for_timeout(900)
+        check("法线箭头", "法线" in page.inner_text("#heat-legend"))
+        page.screenshot(path=str(SHOTS / "10_normals.png"))
+        page.locator("#btn-normals").click()
+
+        # ---- 问题定位
+        page.locator("#btn-issues").click()
+        page.wait_for_timeout(4000)
+        check("问题定位", "标出" in page.inner_text("#heat-legend") or "没找到" in page.inner_text("#heat-legend"),
+              page.inner_text("#heat-legend")[:60])
+
+        # ---- 支撑预览
+        page.locator("#btn-sup").click()
+        page.wait_for_timeout(4000)
+        sup_txt = page.inner_text("#heat-legend")
+        check("支撑预览", "支撑" in sup_txt or "悬垂" in sup_txt, sup_txt[:50])
+        page.screenshot(path=str(SHOTS / "11_supports.png"))
 
         # ---- 修复 + 处理（为了拿到多版本历史）
         page.locator(".step").nth(2).click()

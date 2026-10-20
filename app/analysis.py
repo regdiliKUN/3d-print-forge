@@ -315,6 +315,20 @@ def infer_units(extents) -> dict:
             "message": f"最大尺寸 {mx:.4f}，量级对应米。建议放大 1000 倍转为毫米。",
         }
     if mx <= 400.0:
+        # 254mm = 10 英寸、203.2mm = 8 英寸这类整数值很常见（从英制 CAD 转过来），
+        # 数值已经是毫米但比例可能不对，给个提示而不是直接判「没问题」
+        as_in = mx / 25.4
+        nearest = round(as_in)
+        if 1 <= nearest <= 15 and abs(as_in - nearest) / as_in < 0.002:
+            return {
+                "unit": "mm?",
+                "max_dim": round(mx, 2),
+                "scale": 1.0,
+                "message": (
+                    f"最大尺寸 {mx:.1f}mm，恰好等于 {nearest} 英寸（{as_in:.2f}）。"
+                    f"数值本身是毫米无需换算，但如果原模型是按英寸设计的等比件，实际尺寸应为 {mx * 25.4:.0f}mm。"
+                ),
+            }
         return {
             "unit": "mm",
             "max_dim": round(mx, 2),
@@ -497,8 +511,11 @@ def check_units(mesh, params, ctx=None) -> dict:
     ext = getattr(mesh, "extents", None)
     res = infer_units(ext)
     sev = "ok" if res["unit"] == "mm" else ("error" if res["unit"] == "oversize" else "warning")
+    if res["unit"].endswith("?"):
+        sev = "info"
     return _item("units", "单位与尺寸", sev, res["message"], res,
-                 fix={"action": "rescale", "label": f"按 ×{res['scale']:.4g} 换算"} if abs(res["scale"] - 1) > 1e-9 else None)
+                 fix=({"action": "rescale", "label": f"按 ×{res['scale']:.4g} 换算", "factor": res["scale"]}
+                      if abs(res["scale"] - 1) > 1e-9 else None))
 
 
 # ---------------------------------------------------------------- 热力图场
@@ -591,6 +608,28 @@ def overhang_field(mesh, threshold_deg: float = 45.0) -> dict:
         "threshold": float(threshold_deg),
         "unit": "°",
         "direction": "lower_is_worse",
+    }
+
+
+def component_field(mesh) -> dict:
+    """把连通分量编号摊到顶点上，前端用调色板分色——一眼看出模型由几块拼成。"""
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces)
+    if len(faces) == 0:
+        return {"values": [], "components": 0}
+    n, labels = union_components(faces, len(verts))
+    vert_val = _face_to_vertex(verts, faces, labels.astype(np.float64), mode="mean")
+    areas = tri_areas(verts, faces)
+    sizes = sorted(
+        [{"id": c, "area": round(float(areas[labels == c].sum()), 1)} for c in range(n)],
+        key=lambda x: -x["area"],
+    )
+    return {
+        "values": [round(float(x), 3) for x in vert_val],
+        "components": int(n),
+        "sizes": sizes[:12],
+        "unit": "",
+        "direction": "categorical",
     }
 
 

@@ -224,6 +224,7 @@ def build_supports(
 
     parts = []
     heights = []
+    segments = []
     for (x, y, z), z0 in zip(anchors, land_z):
         h = float(z) - float(z0)
         if h < 0.6:
@@ -233,6 +234,8 @@ def build_supports(
         sup_piece.apply_translation([float(x), float(y), float(z0)])
         parts.append(sup_piece)
         heights.append(h)
+        segments.append([round(float(x), 2), round(float(y), 2),
+                         round(float(z0), 2), round(float(z), 2)])
     if not parts:
         return None, {"count": 0, "note": "悬垂点离落点太近，未生成支撑"}
     sup = trimesh.util.concatenate(parts)
@@ -242,6 +245,7 @@ def build_supports(
         "platform_z": round(base_z, 3),
         "min_height": round(float(min(heights)), 2),
         "max_height": round(float(max(heights)), 2),
+        "segments": segments,
     }
 
 
