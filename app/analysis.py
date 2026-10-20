@@ -501,6 +501,99 @@ def check_units(mesh, params, ctx=None) -> dict:
                  fix={"action": "rescale", "label": f"按 ×{res['scale']:.4g} 换算"} if abs(res["scale"] - 1) > 1e-9 else None)
 
 
+# ---------------------------------------------------------------- 热力图场
+def _face_to_vertex(verts: np.ndarray, faces: np.ndarray, face_val: np.ndarray,
+                    mode: str = "mean") -> np.ndarray:
+    """把逐面数值摊到顶点上，前端才能用顶点色渲染。
+
+    壁厚必须用 min 聚合：薄板的侧面射线会横穿整个板宽（几十毫米），
+    平均或距离加权会把顶面的 0.6mm 冲淡成二十几毫米，热力图就全绿了。
+    """
+    rep = np.repeat(face_val.astype(np.float64), 3)
+    if mode == "min":
+        out = np.full(len(verts), np.inf)
+        np.minimum.at(out, faces.ravel(), rep)
+        out[~np.isfinite(out)] = 0.0
+        return out
+    acc = np.zeros(len(verts), dtype=np.float64)
+    cnt = np.zeros(len(verts), dtype=np.float64)
+    np.add.at(acc, faces.ravel(), rep)
+    np.add.at(cnt, faces.ravel(), 1.0)
+    return acc / np.maximum(cnt, 1.0)
+
+
+def thickness_field(mesh, samples: int = 3000, max_dist: float | None = None) -> dict:
+    """逐面壁厚场：稀疏采样测厚 + KNN 插值铺满全网格。
+
+    逐面都打射线在十万面上要几分钟，所以采 3000 个面测，
+    再用距离反比插值——热力图只需要看出「哪块薄」，不需要每面精确。
+    """
+    from scipy.spatial import cKDTree
+
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces)
+    if len(faces) == 0:
+        return {"values": [], "min": None, "max": None, "p5": None}
+    all_centers = verts[faces].mean(axis=1)
+    n = min(samples, len(faces))
+    rng = np.random.default_rng(17)
+    idx = rng.choice(len(faces), n, replace=False)
+    centers = verts[faces[idx]].mean(axis=1)
+    normals = face_normals(verts, faces[idx])
+    eps = max(1e-4, float(np.linalg.norm(mesh.extents)) * 1e-6)
+    # 热力图要能看出「整件都厚」，所以默认不截断射线；薄壁件射线本来就短，不会慢
+    dist = _raycast_nearest(verts, faces, centers - normals * eps, -normals, eps * 10, max_dist)
+    # 贴着相邻面命中的亚微米值不是真实壁厚，是射线起点偏移不足造成的数值伪影
+    good = np.isfinite(dist) & (dist > 0.05)
+    if not good.any():
+        return {"values": [0.0] * len(verts), "min": None, "max": None, "p5": None}
+    fill = float(np.median(dist[good]))
+    dist = np.where(good, dist, fill)
+
+    tree = cKDTree(centers)
+    k = min(4, len(centers))
+    d, ind = tree.query(all_centers, k=k)
+    if k == 1:
+        face_val = dist[ind]
+    else:
+        w = 1.0 / np.maximum(d, 1e-6)
+        w /= w.sum(axis=1, keepdims=True)
+        face_val = (w * dist[ind]).sum(axis=1)
+    vert_val = _face_to_vertex(verts, faces, face_val, mode="min")
+    return {
+        "values": [round(float(x), 4) for x in vert_val],
+        "min": round(float(vert_val.min()), 3),
+        "max": round(float(vert_val.max()), 3),
+        "p5": round(float(np.percentile(vert_val, 5)), 3),
+        "unit": "mm",
+        "direction": "lower_is_worse",
+    }
+
+
+def overhang_field(mesh, threshold_deg: float = 45.0) -> dict:
+    """逐面悬垂角场：面法线与竖直向下的夹角，0° 完全朝下、90° 竖直、180° 朝上。"""
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces)
+    if len(faces) == 0:
+        return {"values": [], "min": None, "max": None}
+    n = face_normals(verts, faces)
+    ang = np.degrees(np.arccos(np.clip(-n[:, 2], -1.0, 1.0)))
+    # 贴平台的底面本来就有台面承接，标成 180（安全色）避免满屏红
+    centers_z = verts[faces].mean(axis=1)[:, 2]
+    zmin = float(verts[:, 2].min())
+    ang = np.where(centers_z < zmin + 0.5, 180.0, ang)
+    # 用 min 聚合：顶点取相邻面里最危险的那个角，边缘才不会被安全面冲淡
+    vert_val = _face_to_vertex(verts, faces, ang, mode="min")
+    return {
+        "values": [round(float(x), 2) for x in vert_val],
+        "min": round(float(vert_val.min()), 2),
+        "max": round(float(vert_val.max()), 2),
+        "threshold": float(threshold_deg),
+        "unit": "°",
+        "direction": "lower_is_worse",
+    }
+
+
 CHECKS = [
     check_watertight,
     check_normals,

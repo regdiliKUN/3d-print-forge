@@ -1,0 +1,13 @@
+services:
+  forge:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      TPF_HOST: 0.0.0.0
+      TPF_PORT: 8000
+      TPF_MAX_WORKERS: 2
+      TPF_MEMORY_LIMIT_MB: 4096
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

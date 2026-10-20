@@ -1,0 +1,16 @@
+numpy>=1.26
+scipy>=1.11
+trimesh>=4.0
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+rtree>=1.1
+networkx>=3.0
+psutil>=5.9
+manifold3d>=2.3
+fast-simplification>=0.1.7
+scikit-image>=0.22
+mapbox-earcut>=1.0
+triangle>=20200406
+shapely>=2.0
+lxml>=5.0

@@ -107,6 +107,14 @@ class Viewer {
     this.mat = new T.MeshStandardMaterial({ color: 0xb9c6d8, metalness: 0.12, roughness: 0.62 });
     this.mesh = null;
 
+    // 剖切：用局部裁剪平面沿模型 Z 轴（世界 Y）切开，看内部空腔
+    this.renderer.localClippingEnabled = true;
+    this.clipPlane = new T.Plane(new T.Vector3(0, -1, 0), 1e9);
+    this.mat.clippingPlanes = [this.clipPlane];
+    this.mat.clipShadows = false;
+    this.boxHelper = null;
+    this.markers = [];
+
     this.theta = 0.9; this.phi = 1.15; this.radius = 3; this.target = new T.Vector3();
     this._bind();
     this._loop();
@@ -153,10 +161,17 @@ class Viewer {
     g.setIndex(new T.BufferAttribute(idx, 1));
     g.computeVertexNormals();
     g.computeBoundingSphere();
+    g.computeBoundingBox();
     if (this.mesh) { this.group.remove(this.mesh); this.mesh.geometry.dispose(); }
     this.mesh = new T.Mesh(g, this.mat);
+    this.mat.vertexColors = false;
+    this.mat.color.set(0xb9c6d8);
+    this.mat.needsUpdate = true;
     if (this.wire) this.mat.wireframe = true;
     this.group.add(this.mesh);
+    this.box = g.boundingBox.clone();
+    this.clipPlane.constant = this.box.max.y + 1;
+    this.clearBox();
     const bs = g.boundingSphere;
     this.target.set(0, 0, 0);
     this.radius = bs.radius * 2.6;
@@ -165,6 +180,77 @@ class Viewer {
     this.camera.near = bs.radius * 0.01;
     this.camera.far = bs.radius * 40;
     this.camera.updateProjectionMatrix();
+  }
+
+  setHeatmap(vals, kind) {
+    if (!this.ok || !this.mesh) return;
+    const T = this.THREE;
+    const n = vals.length;
+    const colors = new Float32Array(n * 3);
+    // 壁厚：0–1.5mm 红到绿（1.5mm 以上一律安全色，薄区才醒目）
+    // 悬垂角：0–90° 红到绿
+    const hi = kind === "thickness" ? 1.5 : 90.0;
+    for (let i = 0; i < n; i++) {
+      let t = vals[i] / hi;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      let r, g2, b;
+      if (t < 0.5) { r = 1; g2 = t * 2; b = 0.12; }
+      else { r = (1 - t) * 2; g2 = 1; b = 0.12; }
+      colors[i * 3] = r; colors[i * 3 + 1] = g2; colors[i * 3 + 2] = b;
+    }
+    this.mesh.geometry.setAttribute("color", new T.BufferAttribute(colors, 3));
+    this.mat.vertexColors = true;
+    this.mat.color.set(0xffffff);
+    this.mat.needsUpdate = true;
+  }
+
+  clearHeatmap() {
+    if (!this.ok || !this.mesh) return;
+    this.mat.vertexColors = false;
+    this.mat.color.set(0xb9c6d8);
+    this.mat.needsUpdate = true;
+  }
+
+  setClip(t) {
+    if (!this.ok || !this.box) return;
+    const lo = this.box.min.y, hi = this.box.max.y;
+    this.clipPlane.constant = t >= 1 ? hi + 1 : lo + (hi - lo) * t;
+  }
+
+  toggleBox() {
+    if (!this.ok || !this.box) return false;
+    const T = this.THREE;
+    if (this.boxHelper) { this.clearBox(); return false; }
+    this.boxHelper = new T.Box3Helper(this.box, 0x3f8f78);
+    this.group.add(this.boxHelper);
+    return true;
+  }
+
+  clearBox() {
+    if (this.boxHelper) {
+      this.group.remove(this.boxHelper);
+      this.boxHelper.geometry?.dispose?.();
+      this.boxHelper = null;
+    }
+  }
+
+  markPoints(pts, color = 0xe24b4a) {
+    if (!this.ok) return;
+    const T = this.THREE;
+    this.clearMarkers();
+    const geo = new T.SphereGeometry(Math.max(0.4, (this.box ? this.box.getSize(new T.Vector3()).length() : 20) * 0.006), 8, 8);
+    const mat = new T.MeshBasicMaterial({ color });
+    for (const p of pts.slice(0, 400)) {
+      const s = new T.Mesh(geo, mat);
+      s.position.set(p[0], p[1], p[2]);
+      this.group.add(s);
+      this.markers.push(s);
+    }
+  }
+
+  clearMarkers() {
+    (this.markers || []).forEach((m) => this.group.remove(m));
+    this.markers = [];
   }
 
   toggleWire() {
@@ -342,16 +428,28 @@ function renderInspect(stage) {
         <div class="row" style="margin-top:10px">
           <button class="ghost" id="btn-wire">线框</button>
           <button class="ghost" id="btn-orig">看原模型</button>
+          <button class="ghost" id="btn-thick">壁厚热力</button>
+          <button class="ghost" id="btn-over">悬垂热力</button>
+          <button class="ghost" id="btn-box">包围盒</button>
+          <button class="ghost" id="btn-heat-off">还原</button>
           <span class="spacer"></span>
           <span class="dim mono" style="font-size:11px" id="meshstat"></span>
         </div>
+        <div class="field" style="margin-top:12px">
+          <div class="field-top"><span class="field-label">剖切预览</span>
+            <span class="field-unit" id="clip-label">关闭</span></div>
+          <input type="range" id="clip-slider" min="0" max="100" value="100">
+          <div class="field-help">沿 Z 轴拖动剖开模型，检查内部空腔、壁厚和有没有打穿。</div>
+        </div>
+        <div class="dim" style="font-size:11px;margin-top:2px" id="heat-legend"></div>
       </div>
     </div>
     <div class="block">
       <div class="block-head"><div class="block-title">检测报告</div>
         <div class="block-sub">每项都带可执行的修复动作</div></div>
       ${body}
-    </div>`;
+    </div>
+    ${rep ? thicknessPanel(rep) : ""}`;
 
   mountViewer("viewer", S.showOriginal ? "original" : "current");
   $("#btn-scan").onclick = runAnalyze;
@@ -366,12 +464,56 @@ function renderInspect(stage) {
     if (cur) { cur.dispose(); S.viewers = S.viewers.filter((x) => x !== cur); }
     mountViewer("viewer", S.showOriginal ? "original" : "current");
   };
+  $("#btn-thick").onclick = () => loadHeat("thickness");
+  $("#btn-over").onclick = () => loadHeat("overhang");
+  $("#btn-box").onclick = (e) => {
+    const v = S.viewers.find((x) => x.el.id === "viewer");
+    if (v) e.target.classList.toggle("on", v.toggleBox());
+  };
+  $("#clip-slider").oninput = (e) => {
+    const t = +e.target.value / 100;
+    const v = S.viewers.find((x) => x.el.id === "viewer");
+    if (v) v.setClip(t);
+    $("#clip-label").textContent = t >= 1 ? "关闭" : `剖切 ${(t * 100).toFixed(0)}%`;
+  };
+  $("#btn-heat-off").onclick = () => {
+    const v = S.viewers.find((x) => x.el.id === "viewer");
+    if (v) { v.clearHeatmap(); v.clearMarkers(); }
+    $("#heat-legend").textContent = "";
+    $("#btn-thick").classList.remove("on");
+    $("#btn-over").classList.remove("on");
+  };
   $$("[data-fix]", stage).forEach((el) => el.onclick = () => {
     const a = el.dataset.fix;
     if (!S.repairActions.includes(a)) S.repairActions.push(a);
     S.step = 2; renderSteps(); render();
     toast(`已把「${ACT_LABEL[a] || a}」加到修复队列`);
   });
+}
+
+function thicknessPanel(rep) {
+  const it = (rep.items || []).find((x) => x.id === "thickness");
+  if (!it || !it.value || it.value.min == null) return "";
+  const v = it.value;
+  const max = Math.max(Number(v.max) || 3, 2.5);
+  const pct = (x) => Math.max(0, Math.min(100, (Number(x) / max) * 100));
+  const mode = v.mode === "coarse" ? "粗筛" : "全量";
+  return `<div class="block">
+    <div class="block-head"><div class="block-title">壁厚分布</div>
+      <div class="block-sub">红区 &lt; 0.4mm 打不出来，黄区 &lt; 0.8mm 偏薄</div></div>
+    <div class="block-body">
+      <div class="hist-track">
+        <div class="hist-zone danger" style="width:${pct(0.4)}%"></div>
+        <div class="hist-zone warn" style="left:${pct(0.4)}%;width:${Math.max(0, pct(0.8) - pct(0.4))}%"></div>
+        <div class="hist-mark thin" style="left:${pct(v.min)}%"><i></i><span>最薄 ${v.min}</span></div>
+        <div class="hist-mark" style="left:${pct(v.p5)}%"><i></i><span>P5 ${v.p5}</span></div>
+        <div class="hist-mark med" style="left:${pct(v.median)}%"><i></i><span>中位 ${v.median}</span></div>
+      </div>
+      <div class="hist-scale"><span>0</span><span>${max.toFixed(1)} mm</span></div>
+      <div class="field-help">采样 ${v.samples} 面 · 射线方向 ${v.directions || 1} 组 · ${mode}模式。
+        点「壁厚热力」可在 3D 里看分布。</div>
+    </div>
+  </div>`;
 }
 
 function reportHTML(rep) {
@@ -625,25 +767,64 @@ function renderExport(stage) {
       </div>
     </div>` : ""}
     <div class="block">
+      <div class="block-head"><div class="block-title">分件</div>
+        <div class="block-sub">超出成型尺寸时沿主轴切开，切面自动封盖，导出 zip</div></div>
+      <div class="block-body">
+        <div class="field-row">
+          <div class="field">
+            <div class="field-top"><span class="field-label">成型尺寸上限</span><span class="field-unit">mm</span></div>
+            <input type="number" id="split-size" value="192" step="10" min="20" max="1000">
+            <div class="field-help">超过这个长度的方向会被等分切开。192 对应常见中型光固化平台。</div>
+          </div>
+          <div class="field">
+            <div class="field-top"><span class="field-label">切割轴</span></div>
+            <select id="split-axis">
+              <option value="auto">自动（最长边）</option>
+              <option value="x">X 轴</option><option value="y">Y 轴</option><option value="z">Z 轴</option>
+            </select>
+            <div class="field-help">自动按最长边切，通常能切出最少的块数。</div>
+          </div>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <button class="ghost" id="btn-split">执行分件</button>
+          <span class="dim" style="font-size:11px">要求模型已水密</span>
+        </div>
+        <div id="split-result"></div>
+      </div>
+    </div>
+    <div class="block">
       <div class="block-head"><div class="block-title">导出</div>
         <div class="block-sub">模型给切片软件，配置留档，日志用于复现</div></div>
       <div class="block-body">
         <div class="row">
           <button class="primary" data-dl="stl">下载处理后的 STL</button>
+          <button class="ghost" data-dl="3mf">下载 3MF</button>
           <button class="ghost" data-dl="config">下载参数配置 JSON</button>
           <button class="ghost" data-dl="report">下载检测报告</button>
           <button class="ghost" data-dl="log">下载操作日志</button>
         </div>
+        <div class="field-help" style="margin-top:8px">3MF 保留单位和多体结构，比 STL 更适合交给现代切片软件。</div>
       </div>
     </div>
+    ${changed ? `<div class="block">
+      <div class="block-head"><div class="block-title">版本对比</div>
+        <button class="ghost" id="btn-diff">计算差异</button></div>
+      <div class="block-body" id="diff-body">
+        <div class="queue-empty">比较「导入时」和「当前版本」的面数、体积、顶点位移</div>
+      </div>
+    </div>` : ""}
     <div class="block">
       <div class="block-head"><div class="block-title">操作历史</div>
-        <div class="block-sub">${hist.length} 次</div></div>
+        <div class="block-sub">${hist.length} 次 · 可回滚到任意一步</div></div>
       <div class="block-body">
-        ${hist.length ? hist.map((h) => `<div class="metric-row">
+        ${hist.length ? hist.map((h, i) => `<div class="metric-row">
           <span><span class="mono dim">${h.at.slice(11, 19)}</span> &nbsp;${h.action}</span>
-          <b class="dim" style="font-size:10.5px">${h.note || ""}</b></div>`).join("")
+          <span class="dim" style="font-size:10.5px;margin-left:auto;margin-right:10px">${h.note || ""}</span>
+          <button class="ghost" style="font-size:10px;padding:2px 8px" data-revert="${(p.history || []).length - 1 - i}">回到这版</button>
+        </div>`).join("")
         : '<div class="queue-empty">还没有操作记录</div>'}
+        ${hist.length ? `<div class="row" style="margin-top:10px">
+          <button class="ghost" data-revert="-1">回到导入时</button></div>` : ""}
       </div>
     </div>`;
 
@@ -651,6 +832,9 @@ function renderExport(stage) {
     mountViewer("view-orig", "original");
     mountViewer("view-now", "current");
   }
+  $("#btn-split").onclick = runSplit;
+  if ($("#btn-diff")) $("#btn-diff").onclick = loadDiff;
+  $$("[data-revert]", stage).forEach((el) => el.onclick = () => doRevert(+el.dataset.revert));
   $$("[data-dl]", stage).forEach((el) => el.onclick = () => {
     const kind = el.dataset.dl;
     window.location.href = `/api/projects/${S.pid}/download?kind=${kind}`;
@@ -720,6 +904,7 @@ function runAgain(kind) {
   if (kind === "repair") return runRepair();
   if (kind === "process") return runProcess();
   if (kind === "batch") return runBatch();
+  if (kind === "split") return runSplit();
 }
 
 /* ---------------------------------------------------------------- 动作 */
@@ -809,6 +994,7 @@ function refreshAfterJob(j) {
   if (j.kind === "repair") return afterRepair(j);
   if (j.kind === "process") return afterProcess(j);
   if (j.kind === "batch") return afterBatch(j);
+  if (j.kind === "split") return afterSplit(j);
 }
 
 async function runAnalyze() {
@@ -880,6 +1066,120 @@ async function afterProcess(j) {
   toast("处理完成：" + (msgs.join("，") || "无变化"));
   S.step = 4; renderSteps(); render();
   loadAdvice();
+}
+
+async function loadDiff() {
+  const box = $("#diff-body");
+  if (!box) return;
+  box.innerHTML = '<div class="queue-empty">计算中…</div>';
+  try {
+    const d = await api(`/api/projects/${S.pid}/diff`);
+    if (d.identical) {
+      box.innerHTML = `<div class="queue-empty">${d.note || "两个版本完全一致"}</div>`;
+      return;
+    }
+    const a = d.a || {}, b = d.b || {}, dl = d.delta || {}, vv = d.vertices || {};
+    const sign = (x) => (x > 0 ? "+" : "");
+    box.innerHTML = `
+      <div class="compare-grid">
+        <div class="compare-col"><h4>导入时</h4>
+          ${metric("面数", (a.faces || 0).toLocaleString())}
+          ${metric("体积", ((a.volume_mm3 || 0) / 1000).toFixed(2) + " cm³")}
+          ${metric("尺寸", (a.extents || []).map((x) => x.toFixed(1)).join("×") + " mm")}
+        </div>
+        <div class="compare-col"><h4>当前</h4>
+          ${metric("面数", (b.faces || 0).toLocaleString())}
+          ${metric("体积", ((b.volume_mm3 || 0) / 1000).toFixed(2) + " cm³")}
+          ${metric("尺寸", (b.extents || []).map((x) => x.toFixed(1)).join("×") + " mm")}
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        ${metric("面数变化", sign(dl.faces) + (dl.faces || 0).toLocaleString())}
+        ${metric("体积变化", sign(dl.volume_mm3) + ((dl.volume_mm3 || 0) / 1000).toFixed(2) + " cm³")}
+        ${metric("表面积变化", sign(dl.area_mm2) + ((dl.area_mm2 || 0) / 100).toFixed(1) + " cm²")}
+        ${metric("位移顶点", `${(vv.moved || 0).toLocaleString()} / ${(vv.b || 0).toLocaleString()}（${((vv.moved_ratio || 0) * 100).toFixed(1)}%）`)}
+        ${metric("最大位移", (vv.max_displacement || 0).toFixed(2) + " mm")}
+        ${metric("消失区域顶点", (vv.removed_regions || 0).toLocaleString())}
+      </div>
+      <div class="field-help" style="margin-top:10px">${d.note || ""}</div>`;
+  } catch (e) {
+    box.innerHTML = `<div class="queue-empty">对比失败：${e.message}</div>`;
+  }
+}
+
+async function doRevert(index) {
+  try {
+    const r = await api(`/api/projects/${S.pid}/revert`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ index }),
+    });
+    toast(`已回滚到 ${r.label}`);
+    S.project = await api(`/api/projects/${S.pid}`);
+    S.analysis = S.project.analysis || null;
+    await loadProjects();
+    render();
+  } catch (e) { toast("回滚失败：" + e.message, "err"); }
+}
+
+async function runSplit() {
+  const maxSize = parseFloat($("#split-size")?.value || "192");
+  const axis = $("#split-axis")?.value || "auto";
+  try {
+    const r = await api(`/api/projects/${S.pid}/split`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ max_size: maxSize, axis }),
+    });
+    startJob(r, afterSplit);
+  } catch (e) { toast("分件启动失败：" + e.message, "err"); }
+}
+
+function afterSplit(j) {
+  const res = j.result || {};
+  const box = $("#split-result");
+  if (!box) return;
+  if (!res.pieces || !res.pieces.length) {
+    box.innerHTML = `<div class="field-help" style="margin-top:8px">${res.note || "不需要分件"}</div>`;
+    toast(res.note || "不需要分件");
+    return;
+  }
+  const p = res.plan || {};
+  box.innerHTML = `
+    <div class="warn-box" style="margin-top:12px"><div>沿 ${(p.axis || "").toUpperCase()} 轴切成 ${res.pieces.length} 块。
+      切面质心已给出，建议在该位置加 φ3mm 定位桩再装配。</div></div>
+    <div class="metric-row"><span class="dim">分块</span>
+      <b><a href="/api/projects/${S.pid}/download?kind=stl" style="display:none"></a>${res.pieces.length} 块已打包</b></div>
+    ${res.pieces.map((x) => `<div class="metric-row">
+      <span>第 ${x.index} 块 · ${x.file}</span>
+      <b class="dim" style="font-size:10.5px">${x.faces.toLocaleString()} 面 · ${(x.extents || []).map((v) => v.toFixed(1)).join("×")} mm${x.watertight ? "" : " · 未闭合"}</b>
+    </div>`).join("")}
+    <div class="row" style="margin-top:10px">
+      <button class="ghost" id="btn-split-dl">下载分件 zip</button>
+    </div>`;
+  $("#btn-split-dl").onclick = () => { window.location.href = `/api/projects/${S.pid}/split/download`; };
+  toast(`分件完成：${res.pieces.length} 块`);
+}
+
+async function loadHeat(kind) {
+  const v = S.viewers.find((x) => x.el.id === "viewer");
+  if (!v) return toast("预览还没准备好", "warn");
+  toast(kind === "thickness" ? "正在算壁厚场…" : "正在算悬垂场…");
+  try {
+    const m = await api(`/api/projects/${S.pid}/heatmap?kind=${kind}&max_faces=50000`);
+    v.setGeometry(m.vertices, m.indices);
+    const vals = b64ToTyped(m.values, Float32Array);
+    v.setHeatmap(vals, kind);
+    const meta = m.meta || {};
+    const el = $("#heat-legend");
+    if (el) {
+      el.textContent = kind === "thickness"
+        ? `壁厚场 ${meta.min ?? "-"}–${meta.max ?? "-"} mm，P5 = ${meta.p5 ?? "-"} mm。颜色按 0–1.5mm 映射，红=打不出来，橙=偏薄，绿=安全。`
+        : `悬垂角 ${meta.min ?? "-"}–${meta.max ?? "-"}°，阈值 ${meta.threshold ?? 45}°。颜色按 0–90° 映射，红=必须加支撑。`;
+    }
+    $("#btn-thick").classList.toggle("on", kind === "thickness");
+    $("#btn-over").classList.toggle("on", kind === "overhang");
+  } catch (e) {
+    toast("热力图生成失败：" + e.message, "err");
+  }
 }
 
 async function loadAdvice() {

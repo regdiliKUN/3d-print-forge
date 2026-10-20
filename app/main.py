@@ -297,6 +297,40 @@ def project_mesh(
     }
 
 
+@app.get("/api/projects/{pid}/heatmap")
+def project_heatmap(
+    pid: str,
+    kind: str = Query("thickness", pattern="^(thickness|overhang)$"),
+    max_faces: int = Query(0, ge=0, le=500000),
+) -> dict:
+    """逐顶点标量场，前端用顶点色渲染成热力图。"""
+    import numpy as np
+
+    from . import analysis, meshio
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    path = p.get("current") or p.get("source")
+    if not path or not Path(path).exists():
+        raise HTTPException(404, "模型文件不存在")
+    limit = max_faces or config.get().runtime.preview_faces
+    mesh = meshio.load_mesh(Path(path), preview_faces=limit)
+    field = analysis.thickness_field(mesh) if kind == "thickness" else analysis.overhang_field(mesh)
+    v = np.ascontiguousarray(mesh.vertices, np.float32)
+    f = np.ascontiguousarray(mesh.faces, np.uint32)
+    vals = np.ascontiguousarray(np.asarray(field.get("values") or [], dtype=np.float32))
+    return {
+        "kind": kind,
+        "vertices": base64.b64encode(v.tobytes()).decode(),
+        "indices": base64.b64encode(f.tobytes()).decode(),
+        "values": base64.b64encode(vals.tobytes()).decode(),
+        "vertex_count": int(len(v)),
+        "face_count": int(len(f)),
+        "meta": {k: val for k, val in field.items() if k != "values"},
+    }
+
+
 @app.post("/api/projects/{pid}/analyze")
 def analyze(pid: str, payload: dict = Body(default={})) -> dict:
     from . import analysis
@@ -329,6 +363,63 @@ def process(pid: str, payload: dict = Body(...)) -> dict:
     if not p:
         raise HTTPException(404, "项目不存在")
     return _spawn("process", f"处理 {p['name']}", payload, process_mod.run_job, pid)
+
+
+@app.post("/api/projects/{pid}/split")
+def split_project(pid: str, payload: dict = Body(...)) -> dict:
+    from . import split as split_mod
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    return _spawn("split", f"分件 {p['name']}", payload, split_mod.run_job, pid)
+
+
+@app.get("/api/projects/{pid}/diff")
+def project_diff(pid: str, tol: float = Query(0.05, ge=0.0, le=10.0)) -> dict:
+    from . import compare
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    a, b = p.get("original"), p.get("current")
+    if not a or not b or a == b:
+        return {"identical": True, "note": "还没有修改过，无差异可比较"}
+    if not Path(a).exists() or not Path(b).exists():
+        raise HTTPException(404, "版本文件已不存在")
+    return compare.diff_files(Path(a), Path(b), tol)
+
+
+@app.post("/api/projects/{pid}/revert")
+def project_revert(pid: str, payload: dict = Body(default={})) -> dict:
+    """回到某个历史版本。index=-1 表示回到刚导入的状态。"""
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    hist = p.get("history") or []
+    idx = int((payload or {}).get("index", -1))
+    if idx < 0:
+        target = p.get("original")
+        label = "导入时"
+    else:
+        if idx >= len(hist):
+            raise HTTPException(400, "历史索引越界")
+        target = hist[idx].get("out")
+        label = hist[idx].get("action", f"第 {idx + 1} 步")
+    if not target or not Path(target).exists():
+        raise HTTPException(404, "目标版本文件已不存在")
+    store.update(pid, current=target)
+    store.add_history(pid, "revert", {"index": idx}, Path(target), note=f"回滚到 {label}")
+    return {"ok": True, "current": target, "label": label}
+
+
+@app.get("/api/projects/{pid}/split/download")
+def split_download(pid: str) -> Response:
+    files = sorted(config.OUTPUTS.glob(f"{pid}_split_*.zip"),
+                   key=lambda x: x.stat().st_mtime, reverse=True)
+    if not files:
+        raise HTTPException(404, "还没有分件结果")
+    return FileResponse(files[0], media_type="application/zip", filename=files[0].name)
 
 
 @app.get("/api/projects/{pid}/advice")
@@ -433,7 +524,7 @@ def batch_report() -> dict:
 
 # ---------------------------------------------------------------- 导出
 @app.get("/api/projects/{pid}/download")
-def download(pid: str, kind: str = Query("stl", pattern="^(stl|config|log|report)$")) -> Response:
+def download(pid: str, kind: str = Query("stl", pattern="^(stl|3mf|config|log|report)$")) -> Response:
     p = store.get(pid)
     if not p:
         raise HTTPException(404, "项目不存在")
@@ -442,6 +533,23 @@ def download(pid: str, kind: str = Query("stl", pattern="^(stl|config|log|report
         if not src.exists():
             raise HTTPException(404, "模型文件不存在")
         return FileResponse(src, media_type="model/stl", filename=f"{Path(p['name']).stem}_processed.stl")
+    if kind == "3mf":
+        from . import meshio
+
+        src = Path(p.get("current") or p["source"])
+        if not src.exists():
+            raise HTTPException(404, "模型文件不存在")
+        try:
+            m = meshio.load_mesh(src)
+            buf = io.BytesIO()
+            m.export(buf, file_type="3mf")
+        except Exception as e:
+            raise HTTPException(500, f"3MF 导出失败：{e}") from e
+        return Response(
+            buf.getvalue(),
+            media_type="model/3mf",
+            headers={"Content-Disposition": f'attachment; filename="{Path(p["name"]).stem}.3mf"'},
+        )
     if kind == "config":
         from . import advisor
 

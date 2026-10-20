@@ -281,6 +281,32 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
 .ec-detail { font-size: 11.5px; color: #e8b4b4; margin-top: 6px; line-height: 1.7; }
 .ec-actions { display: flex; gap: 7px; margin-top: 10px; flex-wrap: wrap; }
 
+/* ---------------------------------------------------------------- 壁厚分布条 */
+.hist-track {
+  position: relative; height: 24px; background: #14251c;
+  border: 1px solid var(--line); border-radius: 6px; margin-bottom: 4px;
+}
+.hist-zone { position: absolute; top: 0; bottom: 0; }
+.hist-zone.danger { left: 0; background: #3a1618; border-radius: 6px 0 0 6px; }
+.hist-zone.warn { background: #33260d; }
+.hist-mark { position: absolute; top: -3px; bottom: -3px; width: 0; border-left: 1px dashed var(--accent); }
+.hist-mark i {
+  position: absolute; top: 50%; left: -3px; width: 6px; height: 6px;
+  border-radius: 50%; background: var(--accent); transform: translateY(-50%);
+}
+.hist-mark span {
+  position: absolute; top: 27px; left: 0; transform: translateX(-50%);
+  font: 10px var(--mono); color: var(--muted); white-space: nowrap;
+}
+.hist-mark.med { border-color: var(--info); }
+.hist-mark.med i { background: var(--info); }
+.hist-mark.thin { border-color: var(--error); }
+.hist-mark.thin i { background: var(--error); }
+.hist-scale {
+  display: flex; justify-content: space-between; margin-top: 26px;
+  font: 10px var(--mono); color: var(--dim);
+}
+
 /* ---------------------------------------------------------------- 杂项 */
 .dropveil {
   position: fixed; inset: 0; background: rgba(14,16,20,.86);
