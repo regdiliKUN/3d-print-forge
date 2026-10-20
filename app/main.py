@@ -563,6 +563,122 @@ def split_project(pid: str, payload: dict = Body(...)) -> dict:
     return _spawn("split", f"分件 {p['name']}", payload, split_mod.run_job, pid)
 
 
+@app.post("/api/projects/{pid}/resize")
+def resize_project(pid: str, payload: dict = Body(...)) -> dict:
+    """按目标尺寸缩放。lock_ratio=True 以最长边为准等比，否则三轴各自独立。"""
+
+    from . import meshio
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    src = Path(p.get("current") or p.get("source") or "")
+    if not src.exists():
+        raise HTTPException(404, "模型文件不存在")
+    mesh = meshio.load_mesh(src)
+    cur = [float(x) for x in mesh.extents]
+    if min(cur) <= 1e-9:
+        raise HTTPException(400, "模型尺寸为零，无法缩放")
+
+    tw = payload.get("width")
+    td = payload.get("depth")
+    th = payload.get("height")
+    targets = [float(x) for x in (tw, td, th) if x and float(x) > 0]
+    if not targets:
+        raise HTTPException(400, "至少给一个目标尺寸")
+
+    lock = bool(payload.get("lock_ratio", True))
+    if lock:
+        factor = max(targets) / max(cur)
+        mesh.apply_scale(factor)
+        applied = [round(factor, 4)] * 3
+    else:
+        fx = float(tw) / cur[0] if tw and float(tw) > 0 else 1.0
+        fy = float(td) / cur[1] if td and float(td) > 0 else 1.0
+        fz = float(th) / cur[2] if th and float(th) > 0 else 1.0
+        mesh.apply_scale([fx, fy, fz])
+        applied = [round(fx, 4), round(fy, 4), round(fz, 4)]
+
+    mesh.apply_translation([0, 0, -float(mesh.bounds[0][2])])
+    out = config.OUTPUTS / f"{pid}_resize_{int(_time.time())}.stl"
+    mesh.export(str(out))
+    store.add_history(pid, "resize", {"targets": targets, "lock": lock}, out,
+                      note=f"缩放 ×{applied[0]}" + ("" if lock else " (非等比)"))
+    return {"ok": True, "output": str(out), "factors": applied, "lock": lock,
+            "extents": [round(float(x), 2) for x in mesh.extents]}
+
+
+@app.post("/api/projects/{pid}/center")
+def center_project(pid: str) -> dict:
+    """把模型在平台上居中：XY 中心对齐原点，Z 底面贴 0。"""
+    from . import meshio
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    src = Path(p.get("current") or p.get("source") or "")
+    if not src.exists():
+        raise HTTPException(404, "模型文件不存在")
+    mesh = meshio.load_mesh(src)
+    lo, hi = mesh.bounds
+    cx = float((lo[0] + hi[0]) / 2)
+    cy = float((lo[1] + hi[1]) / 2)
+    mesh.apply_translation([-cx, -cy, -float(lo[2])])
+    out = config.OUTPUTS / f"{pid}_center_{int(_time.time())}.stl"
+    mesh.export(str(out))
+    store.add_history(pid, "center", {"dx": -cx, "dy": -cy}, out, note="平台居中")
+    return {"ok": True, "output": str(out),
+            "moved": [round(-cx, 2), round(-cy, 2)],
+            "extents": [round(float(x), 2) for x in mesh.extents]}
+
+
+@app.get("/api/projects/{pid}/layer-times")
+def layer_times(pid: str, layer_h: float = Query(0.05, gt=0.001, le=1.0),
+                exposure: float = Query(2.5, gt=0, le=120),
+                samples: int = Query(40, ge=5, le=200)) -> dict:
+    """每层耗时估算：曝光 + 抬升固定开销 + 按截面积折算的扫描时间。"""
+    from . import meshio
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    src = Path(p.get("current") or p.get("source") or "")
+    if not src.exists():
+        raise HTTPException(404, "模型文件不存在")
+    mesh = meshio.load_mesh(Path(src), preview_faces=60000)
+    lo, hi = float(mesh.bounds[0][2]), float(mesh.bounds[1][2])
+    span = max(hi - lo, 1e-6)
+    lift = 6.0  # 抬升 + 回落 + 停顿的经验值
+    rows = []
+    for i in range(samples):
+        z = lo + span * (i + 0.5) / samples
+        area = 0.0
+        try:
+            sec = mesh.section(plane_origin=[0.0, 0.0, z], plane_normal=[0.0, 0.0, 1.0])
+            if sec is not None:
+                planar, _ = sec.to_planar()
+                area = float(sum(poly.area for poly in planar.polygons_full))
+        except Exception:
+            pass
+        # 扫描时间按面积折算：经验值 1mm² 约 0.012s
+        scan = area * 0.012
+        rows.append({
+            "z": round(z, 2),
+            "area": round(area, 1),
+            "seconds": round(exposure + lift + scan, 2),
+        })
+    total_layers = int(span / layer_h) if span else 0
+    avg = sum(r["seconds"] for r in rows) / max(1, len(rows))
+    return {
+        "layers": rows,
+        "layer_height": layer_h,
+        "total_layers": total_layers,
+        "avg_seconds": round(avg, 2),
+        "est_hours": round(avg * total_layers / 3600, 2),
+        "note": f"{total_layers} 层 × 平均 {avg:.1f}s",
+    }
+
+
 @app.post("/api/projects/{pid}/slice-plane")
 def slice_by_plane(pid: str, payload: dict = Body(...)) -> dict:
     """沿任意平面切成两半。上半写回当前项目，下半另存为新项目。"""
@@ -1307,6 +1423,73 @@ def batch(payload: dict = Body(...)) -> dict:
     if not ids:
         raise HTTPException(400, "未选择项目")
     return _spawn("batch", f"批量处理 {len(ids)} 个模型", payload, batch_mod.run_job, None)
+
+
+QUEUE_FILE = config.STATE / "print_queue.json"
+
+
+def _load_queue() -> list:
+    if QUEUE_FILE.exists():
+        try:
+            data = json.loads(QUEUE_FILE.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+    return []
+
+
+def _save_queue(items: list) -> None:
+    QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    QUEUE_FILE.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+@app.get("/api/queue")
+def get_queue() -> dict:
+    items = _load_queue()
+    out = []
+    for q in items:
+        p = store.get(str(q.get("id") or ""))
+        out.append({**q, "name": (p or {}).get("name") or q.get("name") or "（已删除）",
+                    "exists": p is not None})
+    return {"items": out, "count": len(out)}
+
+
+@app.post("/api/queue")
+def add_to_queue(payload: dict = Body(...)) -> dict:
+    pid = str(payload.get("id") or "")
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    items = _load_queue()
+    if any(x.get("id") == pid for x in items):
+        return {"ok": True, "items": items, "note": "已在队列中"}
+    items.append({
+        "id": pid, "name": p["name"],
+        "added": datetime.now().isoformat(timespec="seconds"),
+        "note": str(payload.get("note") or "")[:100],
+    })
+    _save_queue(items)
+    return {"ok": True, "items": items, "count": len(items)}
+
+
+@app.delete("/api/queue/{index}")
+def remove_from_queue(index: int) -> dict:
+    items = _load_queue()
+    if 0 <= index < len(items):
+        items.pop(index)
+        _save_queue(items)
+    return {"ok": True, "items": items, "count": len(items)}
+
+
+@app.post("/api/queue/reorder")
+def reorder_queue(payload: dict = Body(...)) -> dict:
+    order = [str(x) for x in (payload.get("order") or [])]
+    items = _load_queue()
+    by_id = {str(x.get("id")): x for x in items}
+    new = [by_id[i] for i in order if i in by_id]
+    new += [x for x in items if str(x.get("id")) not in order]
+    _save_queue(new)
+    return {"ok": True, "items": new, "count": len(new)}
 
 
 @app.get("/api/batch/report.csv")

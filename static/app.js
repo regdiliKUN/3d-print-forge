@@ -202,6 +202,16 @@ function renderImport(stage) {
       </div>
     </div>
     <div class="block">
+      <div class="block-head"><div class="block-title">打印队列</div>
+        <div class="block-sub" id="queue-stat">空队列</div></div>
+      <div class="block-body">
+        <div class="row" style="margin-bottom:10px">
+          <button class="ghost" id="btn-queue-add">把当前项目加入队列</button>
+        </div>
+        <div id="queue-list"><div class="queue-empty">队列为空</div></div>
+      </div>
+    </div>
+    <div class="block">
       <div class="block-head"><div class="block-title">批量处理</div>
         <div class="block-sub">勾选多个模型，套用同一套流程</div></div>
       <div class="block-body">
@@ -1217,6 +1227,36 @@ function renderExport(stage) {
       </div>
     </div>
     <div class="block">
+      <div class="block-head"><div class="block-title">精确尺寸</div>
+        <div class="block-sub">按目标尺寸缩放，或一键在平台居中</div></div>
+      <div class="block-body">
+        <div class="field-row">
+          <div class="field">
+            <div class="field-top"><span class="field-label">宽 X</span><span class="field-unit">mm</span></div>
+            <input type="number" id="rs-w" step="1" min="1" placeholder="不改">
+          </div>
+          <div class="field">
+            <div class="field-top"><span class="field-label">深 Y</span><span class="field-unit">mm</span></div>
+            <input type="number" id="rs-d" step="1" min="1" placeholder="不改">
+          </div>
+          <div class="field">
+            <div class="field-top"><span class="field-label">高 Z</span><span class="field-unit">mm</span></div>
+            <input type="number" id="rs-h" step="1" min="1" placeholder="不改">
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label class="dim" style="font-size:11px;display:flex;align-items:center;gap:6px">
+            <input type="checkbox" id="rs-lock" checked> 保持比例（以最大目标值等比）
+          </label>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="ghost" id="btn-resize">缩放</button>
+          <button class="ghost" id="btn-center">平台居中</button>
+          <span class="dim" style="font-size:11px" id="rs-cur"></span>
+        </div>
+      </div>
+    </div>
+    <div class="block">
       <div class="block-head"><div class="block-title">姿态微调</div>
         <div class="block-sub">按 90° 步进转，转完自动落到平台</div></div>
       <div class="block-body">
@@ -1377,6 +1417,18 @@ function renderExport(stage) {
     if ($("#btn-bore-pick")) $("#btn-bore-pick").textContent = "点选孔位（0）";
     toast("已清空孔位");
   };
+  if ($("#btn-queue-add")) $("#btn-queue-add").onclick = async () => {
+    if (!S.pid) return toast("先选一个项目", "warn");
+    try {
+      await api("/api/queue", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: S.pid }),
+      });
+      loadQueue();
+      toast("已加入打印队列");
+    } catch (e) { toast("加入失败：" + e.message, "err"); }
+  };
+  loadQueue();
   $$("[data-print]", stage).forEach((el) => el.onclick = async () => {
     try {
       const r = await api(`/api/projects/${S.pid}/print-record`, {
@@ -1419,6 +1471,37 @@ function renderExport(stage) {
       await loadProjects();
       render();
     } catch (e) { toast("合并失败：" + e.message, "err"); }
+  };
+  if ($("#rs-cur") && S.modelBBox) {
+    const b = S.modelBBox;
+    $("#rs-cur").textContent = `当前 ${(b[1][0] - b[0][0]).toFixed(1)}×${(b[1][1] - b[0][1]).toFixed(1)}×${(b[1][2] - b[0][2]).toFixed(1)}mm`;
+  }
+  if ($("#btn-resize")) $("#btn-resize").onclick = async () => {
+    const body = { lock_ratio: $("#rs-lock").checked };
+    const w = Number($("#rs-w").value), d = Number($("#rs-d").value), h = Number($("#rs-h").value);
+    if (w > 0) body.width = w;
+    if (d > 0) body.depth = d;
+    if (h > 0) body.height = h;
+    if (!body.width && !body.depth && !body.height) return toast("至少填一个目标尺寸", "warn");
+    try {
+      const r = await api(`/api/projects/${S.pid}/resize`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      toast(`已缩放 ×${r.factors[0]}，新尺寸 ${r.extents.map((x) => x.toFixed(1)).join("×")}mm`);
+      S.project = await api(`/api/projects/${S.pid}`);
+      await loadProjects();
+      render();
+    } catch (e) { toast("缩放失败：" + e.message, "err"); }
+  };
+  if ($("#btn-center")) $("#btn-center").onclick = async () => {
+    try {
+      const r = await api(`/api/projects/${S.pid}/center`, { method: "POST" });
+      toast(`已居中，移动 (${r.moved[0]}, ${r.moved[1]})mm`);
+      S.project = await api(`/api/projects/${S.pid}`);
+      await loadProjects();
+      render();
+    } catch (e) { toast("居中失败：" + e.message, "err"); }
   };
   $$("[data-rot]", stage).forEach((el) => el.onclick = async () => {
     const [axis, deg] = el.dataset.rot.split(":");
@@ -1943,6 +2026,43 @@ async function runPack() {
     });
     startJob(r, afterPack);
   } catch (e) { toast("拼盘启动失败：" + e.message, "err"); }
+}
+
+async function loadQueue() {
+  const list = $("#queue-list");
+  const stat = $("#queue-stat");
+  if (!list) return;
+  try {
+    const d = await api("/api/queue");
+    const items = d.items || [];
+    stat.textContent = items.length ? `${items.length} 件待打` : "空队列";
+    if (!items.length) { list.innerHTML = '<div class="queue-empty">队列为空</div>'; return; }
+    list.innerHTML = items.map((q, i) => `<div class="metric-row">
+      <span>${i + 1}. ${q.name}${q.exists ? "" : ' <span class="pill bad">已删除</span>'}</span>
+      <span class="dim" style="font-size:10.5px;margin-left:auto;margin-right:8px">${q.note || ""}</span>
+      <span class="row-ops" style="opacity:1">
+        ${i > 0 ? `<button data-qmove="${i}:-1" title="上移">↑</button>` : ""}
+        ${i < items.length - 1 ? `<button data-qmove="${i}:1" title="下移">↓</button>` : ""}
+        <button data-qdel="${i}" title="移出队列">✕</button>
+      </span>
+    </div>`).join("");
+    $$("[data-qdel]", list).forEach((el) => el.onclick = async () => {
+      await api(`/api/queue/${el.dataset.qdel}`, { method: "DELETE" });
+      loadQueue();
+    });
+    $$("[data-qmove]", list).forEach((el) => el.onclick = async () => {
+      const [idx, delta] = el.dataset.qmove.split(":").map(Number);
+      const ids = items.map((x) => x.id);
+      const j = idx + delta;
+      if (j < 0 || j >= ids.length) return;
+      [ids[idx], ids[j]] = [ids[j], ids[idx]];
+      await api("/api/queue/reorder", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ order: ids }),
+      });
+      loadQueue();
+    });
+  } catch {}
 }
 
 async function loadPrintRecords() {

@@ -130,6 +130,9 @@ def run_job(ctx, params):
     stem = Path(proj["name"]).stem
     meta = []
     for i, piece in enumerate(pieces):
+        # 记下切割时的原始中心，装配预览要按这个位置摆回去
+        c0 = piece.bounds.mean(axis=0)
+        orig_center = [round(float(c0[0]), 2), round(float(c0[1]), 2), round(float(c0[2]), 2)]
         piece.apply_translation([0, 0, -float(piece.bounds[0][2])])
         f = out_dir / f"{stem}_part{i + 1:02d}.stl"
         piece.export(str(f))
@@ -141,6 +144,7 @@ def run_job(ctx, params):
             "volume_mm3": st["volume_mm3"],
             "extents": st["extents"],
             "watertight": st["is_watertight"],
+            "assembly_offset": orig_center,
             "peg_hint": section_centroid(piece, float(piece.bounds[1][p["axis_index"]]), p["axis_index"])
             if i < len(pieces) - 1 else None,
         })
