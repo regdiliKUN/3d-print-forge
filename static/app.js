@@ -26,6 +26,7 @@ const S = {
   search: "",
   favOnly: false,
   redoStack: [],
+  borePoints: [],
 };
 
 const PRESETS = {
@@ -215,6 +216,9 @@ function renderImport(stage) {
           <button class="ghost" id="btn-batch">处理选中（${S.batchSel.size}）</button>
           <button class="ghost" id="btn-pack">拼盘排版（${S.batchSel.size}）</button>
           <button class="ghost" id="btn-zip">打包下载（${S.batchSel.size}）</button>
+          <button class="ghost" id="btn-bundle">导出项目包</button>
+          <button class="ghost" id="btn-bundle-import">导入项目包</button>
+          <input type="file" id="bundle-file" accept=".zip" hidden>
           <span class="dim" style="font-size:11px">统一跑：补洞 → 统一法线 → 去碎屑 → 处理</span>
         </div>
         <div class="field-row" style="margin-top:12px">
@@ -316,6 +320,25 @@ function renderImport(stage) {
   });
   $("#btn-batch").onclick = runBatch;
   $("#btn-pack").onclick = runPack;
+  if ($("#btn-bundle")) $("#btn-bundle").onclick = () => {
+    if (!S.pid) return toast("先选一个项目", "warn");
+    window.location.href = `/api/projects/${S.pid}/bundle`;
+    toast("开始导出项目包");
+  };
+  if ($("#btn-bundle-import")) $("#btn-bundle-import").onclick = () => $("#bundle-file").click();
+  if ($("#bundle-file")) $("#bundle-file").onchange = async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    const fd = new FormData();
+    fd.append("file", f);
+    try {
+      const r = await api("/api/projects/import-bundle", { method: "POST", body: fd });
+      await loadProjects();
+      await loadProject(r.id);
+      toast(`已导入「${r.name}」`);
+    } catch (err) { toast("导入失败：" + err.message, "err"); }
+  };
   $("#btn-zip").onclick = () => {
     const ids = [...S.batchSel];
     if (!ids.length) return toast("先勾选要打包的模型", "warn");
@@ -1104,6 +1127,52 @@ function renderExport(stage) {
       </div>
     </div>` : ""}
     <div class="block">
+      <div class="block-head"><div class="block-title">任意平面切割</div>
+        <div class="block-sub">沿自定义法线切开，保留侧写回当前项目，另一侧另存新项目</div></div>
+      <div class="block-body">
+        <div class="field-row">
+          <div class="field">
+            <div class="field-top"><span class="field-label">法向量</span></div>
+            <div class="row">
+              <input type="number" id="cut-nx" value="0" step="0.1" style="width:70px">
+              <input type="number" id="cut-ny" value="0" step="0.1" style="width:70px">
+              <input type="number" id="cut-nz" value="1" step="0.1" style="width:70px">
+            </div>
+            <div class="field-help">(0,0,1) 水平切；(1,0,0) 竖直切；(1,1,0) 斜切。</div>
+          </div>
+          <div class="field">
+            <div class="field-top"><span class="field-label">切面位置</span>
+              <span class="field-unit" id="cut-pos-label">50%</span></div>
+            <input type="range" id="cut-pos" min="5" max="95" value="50">
+            <div class="field-help">沿法线方向的位置百分比。</div>
+          </div>
+        </div>
+        <div class="row"><button class="ghost" id="btn-cut">切开</button></div>
+      </div>
+    </div>
+    <div class="block">
+      <div class="block-head"><div class="block-title">挖孔</div>
+        <div class="block-sub">点模型表面确定位置，布尔挖圆柱孔</div></div>
+      <div class="block-body">
+        <div class="field-row">
+          <div class="field">
+            <div class="field-top"><span class="field-label">孔径</span><span class="field-unit">mm</span></div>
+            <input type="number" id="bore-d" value="3" step="0.5" min="0.5" max="30">
+          </div>
+          <div class="field">
+            <div class="field-top"><span class="field-label">深度</span><span class="field-unit">mm</span></div>
+            <input type="number" id="bore-depth" value="0" step="1" min="0" max="200">
+            <div class="field-help">0 表示穿透。</div>
+          </div>
+        </div>
+        <div class="row">
+          <button class="ghost" id="btn-bore-pick">点选孔位（0）</button>
+          <button class="ghost" id="btn-bore-apply">执行挖孔</button>
+          <button class="ghost" id="btn-bore-clear">清空孔位</button>
+        </div>
+      </div>
+    </div>
+    <div class="block">
       <div class="block-head"><div class="block-title">打印记录</div>
         <div class="block-sub" id="print-stat">还没记录过</div></div>
       <div class="block-body">
@@ -1243,6 +1312,71 @@ function renderExport(stage) {
   if ($("#btn-diff")) $("#btn-diff").onclick = loadDiff;
   if ($("#btn-undo")) $("#btn-undo").onclick = undoStep;
   if ($("#btn-redo")) $("#btn-redo").onclick = redoStep;
+  if ($("#cut-pos")) $("#cut-pos").oninput = (e) => {
+    $("#cut-pos-label").textContent = `${e.target.value}%`;
+  };
+  if ($("#btn-cut")) $("#btn-cut").onclick = async () => {
+    const n = [Number($("#cut-nx").value), Number($("#cut-ny").value), Number($("#cut-nz").value)];
+    if (!n.some((x) => Math.abs(x) > 1e-9)) return toast("法向量不能全为零", "warn");
+    const bb = S.modelBBox;
+    if (!bb) return toast("模型还没加载完", "warn");
+    const t = Number($("#cut-pos").value) / 100;
+    const center = [0, 1, 2].map((i) => bb[0][i] + (bb[1][i] - bb[0][i]) * t);
+    try {
+      const r = await api(`/api/projects/${S.pid}/slice-plane`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ origin: center, normal: n }),
+      });
+      toast(`已切开：保留 ${r.keep.faces} 面，另一半另存为「${r.other.name}」`);
+      S.project = await api(`/api/projects/${S.pid}`);
+      await loadProjects();
+      render();
+    } catch (e) { toast("切割失败：" + e.message, "err"); }
+  };
+  if ($("#btn-bore-pick")) $("#btn-bore-pick").onclick = (e) => {
+    const v = S.viewers.find((x) => x.el.id === "viewer");
+    if (!v) return toast("预览还没准备好", "warn");
+    if (v.pickMode) {
+      v.disablePick();
+      e.target.classList.remove("on");
+      e.target.textContent = `点选孔位（${S.borePoints.length}）`;
+      return;
+    }
+    v.enablePick((pt) => {
+      S.borePoints.push(pt);
+      v.markPoints(S.borePoints, 0xe24b4a);
+      e.target.textContent = `点选中（${S.borePoints.length}）`;
+    });
+    e.target.classList.add("on");
+    toast("点击模型表面确定孔位");
+  };
+  if ($("#btn-bore-apply")) $("#btn-bore-apply").onclick = async () => {
+    if (!S.borePoints.length) return toast("先点选孔位", "warn");
+    try {
+      const r = await api(`/api/projects/${S.pid}/bore`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          points: S.borePoints,
+          diameter: Number($("#bore-d").value) || 3,
+          depth: Number($("#bore-depth").value) || 0,
+        }),
+      });
+      toast(`挖了 ${r.holes} 个孔，体积 ${(r.volume_mm3 / 1000).toFixed(2)}cm³`);
+      S.borePoints = [];
+      const v = S.viewers.find((x) => x.el.id === "viewer");
+      if (v) v.clearMarkers();
+      S.project = await api(`/api/projects/${S.pid}`);
+      await loadProjects();
+      render();
+    } catch (e) { toast("挖孔失败：" + e.message, "err"); }
+  };
+  if ($("#btn-bore-clear")) $("#btn-bore-clear").onclick = () => {
+    S.borePoints = [];
+    const v = S.viewers.find((x) => x.el.id === "viewer");
+    if (v) v.clearMarkers();
+    if ($("#btn-bore-pick")) $("#btn-bore-pick").textContent = "点选孔位（0）";
+    toast("已清空孔位");
+  };
   $$("[data-print]", stage).forEach((el) => el.onclick = async () => {
     try {
       const r = await api(`/api/projects/${S.pid}/print-record`, {

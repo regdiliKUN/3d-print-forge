@@ -258,6 +258,83 @@ def get_project(pid: str) -> dict:
     return p
 
 
+@app.get("/api/projects/{pid}/bundle")
+def bundle_project(pid: str) -> Response:
+    """把项目连模型和历史一起打包，换机器或备份用。"""
+    import zipfile
+    import io as _io
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    src = Path(p.get("current") or p.get("source") or "")
+    if not src.exists():
+        raise HTTPException(404, "模型文件不存在")
+
+    meta = {k: v for k, v in p.items() if k not in ("history",)}
+    meta["bundle_version"] = 1
+    hist = p.get("history") or []
+
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("project.json", json.dumps(meta, ensure_ascii=False, indent=2))
+        z.write(src, f"model{src.suffix}")
+        # 历史里的产出文件也带上，回滚才能在别的机器上生效
+        for i, h in enumerate(hist):
+            f = Path(h.get("out") or "")
+            if f.exists() and f.stat().st_size < 80 * 1024 * 1024:
+                z.write(f, f"history/{i:03d}{f.suffix}")
+        z.writestr("history.json", json.dumps(hist, ensure_ascii=False, indent=2))
+    return Response(
+        buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{Path(p["name"]).stem}.zip"'},
+    )
+
+
+@app.post("/api/projects/import-bundle")
+async def import_bundle(file: UploadFile = File(...)) -> dict:
+    """导入项目包。防 zip slip：成员路径不允许绝对路径或 .."""
+    import zipfile
+    import io as _io
+
+    raw = await file.read()
+    if len(raw) > 300 * 1024 * 1024:
+        raise HTTPException(400, "包太大（上限 300MB）")
+    try:
+        z = zipfile.ZipFile(_io.BytesIO(raw))
+    except Exception as e:
+        raise HTTPException(400, f"不是有效的 zip：{e}") from e
+
+    names = z.namelist()
+    if "project.json" not in names:
+        raise HTTPException(400, "包里缺少 project.json，不是本项目导出的包")
+    for n in names:
+        if n.startswith("/") or ".." in Path(n).parts or ":" in n:
+            raise HTTPException(400, f"包内有非法路径：{n}")
+
+    try:
+        meta = json.loads(z.read("project.json").decode("utf-8"))
+    except Exception as e:
+        raise HTTPException(400, f"project.json 解析失败：{e}") from e
+
+    model_name = next((n for n in names if n.startswith("model.")), None)
+    if not model_name:
+        raise HTTPException(400, "包里缺少模型文件")
+
+    safe_stem = re.sub(r"[^\w\u4e00-\u9fa5.-]+", "_", Path(str(meta.get("name") or "imported")).stem)[:60]
+    dest = config.UPLOADS / f"{uuid.uuid4().hex[:8]}_{safe_stem}{Path(model_name).suffix}"
+    dest.write_bytes(z.read(model_name))
+
+    proj = store.create(f"{safe_stem}{Path(model_name).suffix}", dest)
+    store.update(proj["id"], tags=list(meta.get("tags") or []),
+                 favorite=bool(meta.get("favorite")),
+                 analysis=meta.get("analysis"), advice=meta.get("advice"))
+    return {"ok": True, "id": proj["id"], "name": proj["name"],
+            "history": len(meta.get("history") or []),
+            "note": "历史文件已解包，但只保留模型本体，回滚记录需在原机器上使用"}
+
+
 @app.post("/api/projects/{pid}/print-record")
 def add_print_record(pid: str, payload: dict = Body(default={})) -> dict:
     """记一次实际打印结果。攒多了能看出这个模型/参数组合到底靠不靠谱。"""
@@ -484,6 +561,120 @@ def split_project(pid: str, payload: dict = Body(...)) -> dict:
     if not p:
         raise HTTPException(404, "项目不存在")
     return _spawn("split", f"分件 {p['name']}", payload, split_mod.run_job, pid)
+
+
+@app.post("/api/projects/{pid}/slice-plane")
+def slice_by_plane(pid: str, payload: dict = Body(...)) -> dict:
+    """沿任意平面切成两半。上半写回当前项目，下半另存为新项目。"""
+    import numpy as np
+
+    from . import meshio
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    src = Path(p.get("current") or p.get("source") or "")
+    if not src.exists():
+        raise HTTPException(404, "模型文件不存在")
+    mesh = meshio.load_mesh(src)
+    if not mesh.is_watertight:
+        raise HTTPException(400, "切割要求模型水密，切面才能正确封盖")
+
+    origin = np.asarray(payload.get("origin") or [0, 0, 0], dtype=np.float64)
+    normal = np.asarray(payload.get("normal") or [0, 0, 1], dtype=np.float64)
+    norm = float(np.linalg.norm(normal))
+    if norm < 1e-9:
+        raise HTTPException(400, "法向量不能为零")
+    normal = normal / norm
+
+    try:
+        upper = mesh.slice_plane(origin, normal, cap=True)
+        lower = mesh.slice_plane(origin, -normal, cap=True)
+    except Exception as e:
+        raise HTTPException(500, f"切割失败：{e}") from e
+    if upper is None or lower is None or len(upper.faces) == 0 or len(lower.faces) == 0:
+        raise HTTPException(400, "平面没有穿过模型，或切开后有一侧为空")
+
+    ts = int(_time.time())
+    out_a = config.OUTPUTS / f"{pid}_cut_keep_{ts}.stl"
+    out_b = config.OUTPUTS / f"{pid}_cut_other_{ts}.stl"
+    upper.export(str(out_a))
+    lower.export(str(out_b))
+    store.add_history(pid, "slice_plane", {"normal": normal.tolist()}, out_a,
+                      note=f"沿法线切割，保留 {len(upper.faces)} 面")
+    new = store.create(f"{Path(p['name']).stem}_另一半.stl", out_b)
+    return {
+        "ok": True,
+        "keep": {"faces": int(len(upper.faces)), "volume_mm3": round(float(upper.volume), 1)},
+        "other": {"id": new["id"], "name": new["name"],
+                  "faces": int(len(lower.faces)), "volume_mm3": round(float(lower.volume), 1)},
+        "normal": [round(float(x), 3) for x in normal],
+    }
+
+
+@app.post("/api/projects/{pid}/bore")
+def bore_holes(pid: str, payload: dict = Body(...)) -> dict:
+    """在指定位置挖圆柱孔。depth=0 表示穿透。"""
+    import numpy as np
+    import trimesh
+
+    from . import meshio
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    src = Path(p.get("current") or p.get("source") or "")
+    if not src.exists():
+        raise HTTPException(404, "模型文件不存在")
+    pts = payload.get("points")
+    if not isinstance(pts, list) or not pts:
+        raise HTTPException(400, "需要 points 数组")
+    diameter = float(payload.get("diameter", 3.0))
+    if diameter <= 0:
+        raise HTTPException(400, "孔径必须大于 0")
+    depth = float(payload.get("depth", 0.0))
+    direction = np.asarray(payload.get("direction") or [0, 0, -1], dtype=np.float64)
+    dn = float(np.linalg.norm(direction))
+    if dn < 1e-9:
+        raise HTTPException(400, "方向不能为零")
+    direction = direction / dn
+
+    mesh = meshio.load_mesh(src)
+    if not mesh.is_watertight:
+        raise HTTPException(400, "挖孔要求模型水密")
+
+    # 圆柱要够长，保证穿透或达到指定深度
+    span = float(np.linalg.norm(mesh.extents)) * 1.5 + 10.0
+    length = span if depth <= 0 else depth + 1.0
+    axis_z = np.array([0.0, 0.0, 1.0])
+    rot = trimesh.geometry.align_vectors(axis_z, direction)
+    cutters = []
+    for pt in pts[:50]:
+        if not isinstance(pt, (list, tuple)) or len(pt) < 3:
+            continue
+        c = trimesh.creation.cylinder(radius=diameter / 2.0, height=length, sections=32)
+        c.apply_transform(rot)
+        # 圆柱默认中心在原点、沿 z 延伸 ±length/2；变换后沿 direction 延伸。
+        # 把中心放到 pt + direction*length/2，一端正好在 pt、另一端朝 direction 伸出。
+        c.apply_translation(np.asarray(pt[:3], dtype=np.float64) + direction * (length / 2.0))
+        cutters.append(c)
+    if not cutters:
+        raise HTTPException(400, "没有有效的孔位")
+
+    try:
+        result = trimesh.boolean.difference([mesh] + cutters, engine="manifold")
+    except Exception as e:
+        raise HTTPException(500, f"挖孔失败：{e}") from e
+    if result is None or len(result.faces) == 0:
+        raise HTTPException(400, "挖孔结果为空，请检查孔位是否在模型内")
+
+    out = config.OUTPUTS / f"{pid}_bore_{int(_time.time())}.stl"
+    result.export(str(out))
+    store.add_history(pid, "bore", {"count": len(cutters), "diameter": diameter}, out,
+                      note=f"挖 {len(cutters)} 个 φ{diameter}mm 孔")
+    return {"ok": True, "holes": len(cutters), "faces": int(len(result.faces)),
+            "volume_mm3": round(float(result.volume), 1),
+            "watertight": bool(result.is_watertight)}
 
 
 @app.post("/api/projects/{pid}/boolean")

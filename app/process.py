@@ -263,6 +263,21 @@ def build_supports(
         sq = np.sqrt(r1)
         anchors = (1 - sq) * tris[:, 0] + sq * (1 - r2) * tris[:, 1] + sq * r2 * tris[:, 2]
         anchor_normals = analysis.face_normals(v, f)[picked_faces]
+
+        # 面积加权采样会重复抽到同一个大面，导致同一位置叠好几根柱。
+        # 用 KD 树按真实距离去重：分格法在格子边界会漏（跨格只差 0.1mm 也算不同格）。
+        if len(anchors) > 1:
+            from scipy.spatial import cKDTree
+
+            min_dist = max(0.5, float(diameter) * 1.5)
+            tree2d = cKDTree(anchors[:, :2])
+            keep_mask = np.ones(len(anchors), dtype=bool)
+            for i, j in sorted(tree2d.query_pairs(min_dist)):
+                if keep_mask[i] and keep_mask[j]:
+                    keep_mask[j] = False
+            if keep_mask.any():
+                anchors = anchors[keep_mask]
+                anchor_normals = anchor_normals[keep_mask]
         # 只对自动识别的点过滤「贴平台」；手动点选是用户明确要的，不能悄悄丢掉
         anchors = anchors[anchors[:, 2] > base_z + 0.5]
 
