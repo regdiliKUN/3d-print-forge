@@ -258,6 +258,30 @@ def get_project(pid: str) -> dict:
     return p
 
 
+@app.patch("/api/projects/{pid}")
+def patch_project(pid: str, payload: dict = Body(...)) -> dict:
+    """改名、收藏、打标签。只接受白名单字段，避免误改 current 之类。"""
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    patch: dict = {}
+    if "name" in payload:
+        name = str(payload["name"]).strip()
+        if not name:
+            raise HTTPException(400, "名称不能为空")
+        patch["name"] = name[:120]
+    if "favorite" in payload:
+        patch["favorite"] = bool(payload["favorite"])
+    if "tags" in payload:
+        tags = payload["tags"]
+        if not isinstance(tags, list):
+            raise HTTPException(400, "tags 必须是数组")
+        patch["tags"] = [str(t).strip()[:24] for t in tags if str(t).strip()][:12]
+    if not patch:
+        raise HTTPException(400, "没有可更新的字段")
+    return store.update(pid, **patch) or {}
+
+
 @app.delete("/api/projects/{pid}")
 def delete_project(pid: str) -> dict:
     return {"ok": store.delete(pid)}
@@ -376,6 +400,44 @@ def split_project(pid: str, payload: dict = Body(...)) -> dict:
     if not p:
         raise HTTPException(404, "项目不存在")
     return _spawn("split", f"分件 {p['name']}", payload, split_mod.run_job, pid)
+
+
+@app.get("/api/projects/{pid}/section-profile")
+def section_profile(pid: str, layers: int = Query(40, ge=5, le=200)) -> dict:
+    """沿 Z 轴等距切若干层，返回每层截面积——画成曲线能看出哪里突然收窄或塌陷。"""
+    from . import meshio
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    path = p.get("current") or p.get("source")
+    if not path or not Path(path).exists():
+        raise HTTPException(404, "模型文件不存在")
+    mesh = meshio.load_mesh(Path(path), preview_faces=60000)
+    lo, hi = float(mesh.bounds[0][2]), float(mesh.bounds[1][2])
+    span = max(hi - lo, 1e-6)
+    rows = []
+    for i in range(layers):
+        z = lo + span * (i + 0.5) / layers
+        area, n = 0.0, 0
+        try:
+            sec = mesh.section(plane_origin=[0.0, 0.0, z], plane_normal=[0.0, 0.0, 1.0])
+            if sec is not None:
+                planar, _ = sec.to_planar()
+                area = float(sum(poly.area for poly in planar.polygons_full))
+                n = len(sec.entities)
+        except Exception:
+            pass
+        rows.append({"z": round(z, 2), "area": round(area, 1), "contours": n})
+    areas = [r["area"] for r in rows]
+    return {
+        "layers": rows,
+        "zmin": round(lo, 2),
+        "zmax": round(hi, 2),
+        "max_area": round(max(areas) if areas else 0.0, 1),
+        "min_area": round(min(areas) if areas else 0.0, 1),
+        "note": f"{layers} 层扫描，截面最大 {max(areas) if areas else 0:.0f}mm²",
+    }
 
 
 @app.get("/api/projects/{pid}/section")
@@ -626,6 +688,30 @@ def _build_report_html(p: dict) -> str:
 
     warns = "".join(f"<li>{esc(str(w))}</li>" for w in (adv.get("warnings") or []))
 
+    q = rep.get("quality") or {}
+    grade_color = {"A": "#5dcaa5", "B": "#97c459", "C": "#ef9f27", "D": "#e24b4a"}.get(q.get("grade"), "#888")
+    quality_block = ""
+    if q:
+        bars = "".join(
+            f'<tr><td>{esc(str(p.get("name")))}</td>'
+            f'<td style="width:46%"><div class="qbar"><i style="width:'
+            f'{(float(p.get("score", 0)) / max(1, int(p.get("max", 1))) * 100):.0f}%;background:'
+            f'{"#5dcaa5" if float(p.get("score", 0)) / max(1, int(p.get("max", 1))) > 0.8 else "#ef9f27"}"></i></div></td>'
+            f'<td class="val" style="text-align:right">{p.get("score")}/{p.get("max")}</td>'
+            f'<td class="muted">{esc(str(p.get("note")))}</td></tr>'
+            for p in (q.get("parts") or [])
+        )
+        quality_block = f"""
+<h2>网格质量</h2>
+<div style="display:flex;align-items:center;gap:20px;margin-bottom:14px">
+  <div style="font:500 40px Consolas,monospace;color:{grade_color}">{q.get("score")}<span style="font-size:16px;color:#8b93a5"> /100</span></div>
+  <div>
+    <div style="color:{grade_color};font-size:14px">{q.get("grade")} 级 · {esc(str(q.get("verdict")))}</div>
+  </div>
+</div>
+<table><tr><th>项目</th><th>得分</th><th style="text-align:right">分数</th><th>说明</th></tr>{bars}</table>
+"""
+
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <title>{esc(str(p.get("name")))} · 处理报告</title>
@@ -647,6 +733,8 @@ td{{padding:9px 10px;border-bottom:1px solid #1f2430;vertical-align:top}}
 .card{{background:#151821;border:1px solid #262b38;border-radius:8px;padding:12px 16px;min-width:130px}}
 .card b{{display:block;font-size:18px;font-weight:500;color:#5dcaa5;font-family:Consolas,monospace}}
 .card span{{font-size:11px;color:#8b93a5}}
+.qbar{{height:6px;background:#1f2430;border-radius:3px;overflow:hidden}}
+.qbar i{{display:block;height:100%;border-radius:3px}}
 .warn{{background:#1e1710;border:1px solid #4a3410;border-radius:8px;padding:12px 18px;color:#e8c48a;font-size:13px}}
 ul{{margin:0;padding-left:20px}}
 footer{{margin-top:40px;color:#5f6675;font-size:11px;border-top:1px solid #262b38;padding-top:12px}}
@@ -662,6 +750,7 @@ footer{{margin-top:40px;color:#5f6675;font-size:11px;border-top:1px solid #262b3
   <div class="card"><b>{len(hist)}</b><span>操作次数</span></div>
 </div>
 
+{quality_block}
 <h2>检测报告</h2>
 <table><tr><th>项目</th><th>结论</th><th>说明</th></tr>{rows}</table>
 
@@ -818,6 +907,49 @@ def batch_report_csv() -> Response:
         body.encode("utf-8"),
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="batch_report.csv"'},
+    )
+
+
+@app.get("/api/batch/export.zip")
+def batch_export_zip(ids: str = Query("", description="逗号分隔的项目 id，留空导出全部")) -> Response:
+    """把多个项目的当前模型打包成一个 zip。"""
+    import zipfile
+    import io as _io
+
+    wanted = [x.strip() for x in ids.split(",") if x.strip()]
+    projects = []
+    if wanted:
+        for pid in wanted:
+            p = store.get(pid)
+            if p:
+                projects.append(p)
+    else:
+        for item in store.list_all():
+            p = store.get(item["id"])
+            if p:
+                projects.append(p)
+    if not projects:
+        raise HTTPException(404, "没有可导出的项目")
+
+    buf = _io.BytesIO()
+    manifest = []
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in projects:
+            src = Path(p.get("current") or p.get("source") or "")
+            if not src.exists():
+                continue
+            name = f"{Path(p['name']).stem}_{p['id'][:6]}{src.suffix}"
+            z.write(src, name)
+            st = (p.get("analysis") or {}).get("stats") or {}
+            manifest.append({
+                "id": p["id"], "name": p["name"], "file": name,
+                "faces": st.get("faces"), "volume_mm3": st.get("volume_mm3"),
+            })
+        z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+    return Response(
+        buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="models.zip"'},
     )
 
 

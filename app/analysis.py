@@ -620,6 +620,69 @@ def overhang_field(mesh, threshold_deg: float = 45.0) -> dict:
     }
 
 
+def quality_score(report: dict) -> dict:
+    """把七项检测折算成 0–100 分和等级。
+
+    权重按「对打印成败的影响」分配：水密和壁厚最致命，单位错了整件比例都不对，
+    但单位问题在切片前就能看出来，所以权重低一些。
+    """
+    items = {i.get("id"): i for i in (report.get("items") or [])}
+    parts: list[dict] = []
+
+    def add(name: str, got: float, full: int, note: str) -> None:
+        parts.append({"name": name, "score": round(max(0.0, min(float(full), got)), 1),
+                      "max": full, "note": note})
+
+    it = items.get("watertight") or {}
+    b = int((it.get("value") or {}).get("boundary_edges") or 0)
+    add("水密性", 25 if b == 0 else max(0, 25 - min(25, b * 2)), 25, f"开放边 {b}")
+
+    it = items.get("normals") or {}
+    vol = float((it.get("value") or {}).get("signed_volume") or 0)
+    deg = int((it.get("value") or {}).get("degenerate_faces") or 0)
+    n_score = 15 if vol > 0 and deg == 0 else (8 if vol > 0 else 0)
+    add("法线", n_score, 15, f"有向体积 {vol:.0f}，退化面 {deg}")
+
+    it = items.get("thickness") or {}
+    v = it.get("value") or {}
+    mn = v.get("min")
+    if mn is None:
+        t_score = 12.0
+        note = "未测出"
+    else:
+        mn = float(mn)
+        t_score = 20 if mn >= 1.5 else 14 if mn >= 0.8 else 7 if mn >= 0.4 else 0
+        note = f"最薄 {mn:.2f}mm"
+    add("壁厚", t_score, 20, note)
+
+    it = items.get("nonmanifold") or {}
+    c = int((it.get("value") or {}).get("count") or 0)
+    add("流形性", 15 if c == 0 else max(0, 15 - min(15, c)), 15, f"非流形边 {c}")
+
+    it = items.get("self_intersection") or {}
+    c = int((it.get("value") or {}).get("count") or 0)
+    add("自交", 10 if c == 0 else max(0, 10 - min(10, c / 5)), 10, f"穿插 {c} 处")
+
+    it = items.get("components") or {}
+    n = int((it.get("value") or {}).get("components") or 1)
+    add("连通性", 10 if n == 1 else max(0, 10 - (n - 1) * 3), 10, f"{n} 个部件")
+
+    it = items.get("units") or {}
+    u = str((it.get("value") or {}).get("unit") or "unknown")
+    add("单位", 5 if u == "mm" else (3 if u.endswith("?") else 1), 5, u)
+
+    total = sum(p["score"] for p in parts)
+    grade = "A" if total >= 90 else "B" if total >= 75 else "C" if total >= 60 else "D"
+    verdict = {
+        "A": "可以直接打印",
+        "B": "小问题，建议修一下再打",
+        "C": "有明显缺陷，修完再打成功率更高",
+        "D": "问题严重，直接打大概率失败",
+    }[grade]
+    return {"score": round(total, 1), "grade": grade, "verdict": verdict,
+            "parts": parts, "max": 100}
+
+
 def component_field(mesh) -> dict:
     """把连通分量编号摊到顶点上，前端用调色板分色——一眼看出模型由几块拼成。"""
     verts = np.asarray(mesh.vertices, dtype=np.float64)
@@ -721,6 +784,7 @@ def run_job(ctx, params):
         "stats": stats,
         "items": final_items,
         "summary": summary,
+        "quality": quality_score({"items": final_items}),
     }
     store.update(pid, analysis=report)
     ctx.tick(1.0, "检测完成", "done")

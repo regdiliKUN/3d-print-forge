@@ -56,9 +56,20 @@ def main() -> int:
         page.wait_for_selector(".report-item", timeout=90000)
         time.sleep(2)
 
-        # ---- 壁厚分布条
+        # ---- 质量评分 + 壁厚分布条
+        has_score = page.locator(".score-gauge").count() > 0
+        check("质量评分仪表已渲染", has_score)
+        if has_score:
+            txt = page.inner_text(".score-verdict")
+            check("评分结论有文字", len(txt) > 3, txt)
         has_hist = page.locator(".hist-track").count() > 0
         check("壁厚分布条已渲染", has_hist)
+
+        # ---- 截面面积曲线
+        page.locator("#btn-profile").click()
+        page.wait_for_function(
+            "() => document.querySelector('#profile-body svg') !== null", timeout=60000)
+        check("截面面积曲线已绘制", page.locator("#profile-body svg").count() > 0)
         page.screenshot(path=str(SHOTS / "1_report.png"))
 
         # ---- 壁厚热力图

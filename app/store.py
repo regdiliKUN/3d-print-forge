@@ -37,6 +37,7 @@ def create(name: str, source: Path) -> dict:
         "advice": None,
         "stats": {},
         "tags": [],
+        "favorite": False,
     }
     with _LOCK:
         _write(proj)
@@ -104,6 +105,9 @@ def list_all() -> list[dict]:
                     "issues": (d.get("analysis") or {}).get("summary", {}).get("total", None),
                     "severity": (d.get("analysis") or {}).get("summary", {}).get("worst", None),
                     "history": len(d.get("history", [])),
+                    "favorite": bool(d.get("favorite")),
+                    "tags": d.get("tags") or [],
+                    "volume_cm3": round(((d.get("analysis") or {}).get("stats") or {}).get("volume_mm3", 0) / 1000, 2),
                 }
             )
         except Exception:

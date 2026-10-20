@@ -23,6 +23,8 @@ const S = {
     support_diameter: 1.0, support_spacing: 3.0, support_points: [], orient: true, scale: 1.0,
   },
   batchSel: new Set(),
+  search: "",
+  favOnly: false,
 };
 
 const PRESETS = {
@@ -156,13 +158,27 @@ function renderImport(stage) {
     $("#btn-pick2").onclick = () => $("#file-input").click();
     return;
   }
-  const rows = S.projects.map((p) => {
+  const q = (S.search || "").toLowerCase();
+  let list = S.projects.filter((p) => {
+    if (S.favOnly && !p.favorite) return false;
+    if (!q) return true;
+    return (p.name || "").toLowerCase().includes(q)
+      || (p.tags || []).some((t) => t.toLowerCase().includes(q));
+  });
+  list = [...list].sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0));
+  const rows = list.map((p) => {
     const sev = p.severity;
     const pill = sev === "error" ? "bad" : sev === "warning" ? "warn" : (sev ? "good" : "");
     return `<div class="project-row ${p.id === S.pid ? "active" : ""}" data-pid="${p.id}">
+      <span class="fav ${p.favorite ? "on" : ""}" data-fav="${p.id}" title="收藏">${p.favorite ? "★" : "☆"}</span>
       <span class="project-name">${p.name}</span>
+      ${(p.tags || []).map((t) => `<span class="pill tag">${t}</span>`).join("")}
       ${sev ? `<span class="pill ${pill}">${SEV[sev] || sev}</span>` : '<span class="pill">未检测</span>'}
-      <span class="project-meta">${p.history || 0} 次操作</span>
+      <span class="project-meta">${p.volume_cm3 ? p.volume_cm3 + "cm³" : ""} ${p.history || 0} 次操作</span>
+      <span class="row-ops">
+        <button data-rename="${p.id}" title="重命名">改名</button>
+        <button data-tag="${p.id}" title="编辑标签">标签</button>
+      </span>
     </div>`;
   }).join("");
 
@@ -174,7 +190,13 @@ function renderImport(stage) {
         <button class="primary" id="btn-add">添加文件</button>
       </div>
       <div class="block-body">
-        <div class="project-list">${rows || '<div class="queue-empty">还没有模型</div>'}</div>
+        <div class="row" style="margin-bottom:10px">
+          <input type="text" id="proj-search" placeholder="搜索名称或标签…" value="${S.search}"
+                 style="flex:1;max-width:280px">
+          <button class="ghost ${S.favOnly ? "on" : ""}" id="btn-fav-only">只看收藏</button>
+          <span class="dim" style="font-size:11px">${list.length}/${S.projects.length}</span>
+        </div>
+        <div class="project-list">${rows || '<div class="queue-empty">没有匹配的模型</div>'}</div>
       </div>
     </div>
     <div class="block">
@@ -191,9 +213,22 @@ function renderImport(stage) {
         <div class="row" style="margin-top:12px">
           <button class="ghost" id="btn-batch">处理选中（${S.batchSel.size}）</button>
           <button class="ghost" id="btn-pack">拼盘排版（${S.batchSel.size}）</button>
+          <button class="ghost" id="btn-zip">打包下载（${S.batchSel.size}）</button>
           <span class="dim" style="font-size:11px">统一跑：补洞 → 统一法线 → 去碎屑 → 处理</span>
         </div>
         <div class="field-row" style="margin-top:12px">
+          <div class="field">
+            <div class="field-top"><span class="field-label">机型</span></div>
+            <select id="pack-printer">
+              <option value="">自定义</option>
+              <option value="192,120">Mono X / 中型（192×120）</option>
+              <option value="143,89">Mars 3（143×89）</option>
+              <option value="134,75">Sonic Mini 8K（134×75）</option>
+              <option value="298,165">Mono X 6K / 大型（298×165）</option>
+              <option value="220,220">FDM 220×220</option>
+              <option value="350,350">FDM 350×350</option>
+            </select>
+          </div>
           <div class="field">
             <div class="field-top"><span class="field-label">平台宽</span><span class="field-unit">mm</span></div>
             <input type="number" id="pack-w" value="192" step="10" min="40" max="1000">
@@ -208,7 +243,63 @@ function renderImport(stage) {
     </div>`;
 
   $("#btn-add").onclick = () => $("#file-input").click();
-  $$(".project-row", stage).forEach((el) => el.onclick = () => loadProject(el.dataset.pid));
+  $$(".project-row", stage).forEach((el) => el.onclick = (e) => {
+    if (e.target.closest("[data-fav],[data-rename],[data-tag]")) return;
+    loadProject(el.dataset.pid);
+  });
+  const search = $("#proj-search");
+  if (search) {
+    search.oninput = (e) => { S.search = e.target.value; render(); };
+    search.onkeydown = (e) => { if (e.key === "Escape") { S.search = ""; render(); } };
+  }
+  if ($("#btn-fav-only")) $("#btn-fav-only").onclick = () => { S.favOnly = !S.favOnly; render(); };
+  $$("[data-fav]", stage).forEach((el) => el.onclick = async (e) => {
+    e.stopPropagation();
+    const id = el.dataset.fav;
+    const cur = S.projects.find((x) => x.id === id);
+    try {
+      await api(`/api/projects/${id}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ favorite: !(cur && cur.favorite) }),
+      });
+      await loadProjects();
+      render();
+    } catch (err) { toast("操作失败：" + err.message, "err"); }
+  });
+  $$("[data-rename]", stage).forEach((el) => el.onclick = async (e) => {
+    e.stopPropagation();
+    const id = el.dataset.rename;
+    const cur = S.projects.find((x) => x.id === id);
+    const name = prompt("新名称", cur ? cur.name : "");
+    if (!name || !name.trim()) return;
+    try {
+      await api(`/api/projects/${id}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.trim() }),
+      });
+      await loadProjects();
+      if (S.pid === id) S.project = await api(`/api/projects/${id}`);
+      render();
+      toast("已重命名");
+    } catch (err) { toast("重命名失败：" + err.message, "err"); }
+  });
+  $$("[data-tag]", stage).forEach((el) => el.onclick = async (e) => {
+    e.stopPropagation();
+    const id = el.dataset.tag;
+    const cur = S.projects.find((x) => x.id === id);
+    const raw = prompt("标签（用逗号分隔，留空清除）", ((cur && cur.tags) || []).join(","));
+    if (raw === null) return;
+    const tags = raw.split(/[,，]/).map((t) => t.trim()).filter(Boolean);
+    try {
+      await api(`/api/projects/${id}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags }),
+      });
+      await loadProjects();
+      render();
+      toast(tags.length ? `已打 ${tags.length} 个标签` : "已清除标签");
+    } catch (err) { toast("操作失败：" + err.message, "err"); }
+  });
   $$("[data-batch]", stage).forEach((el) => el.onclick = (e) => {
     e.preventDefault();
     const id = el.dataset.batch;
@@ -219,6 +310,18 @@ function renderImport(stage) {
   });
   $("#btn-batch").onclick = runBatch;
   $("#btn-pack").onclick = runPack;
+  $("#btn-zip").onclick = () => {
+    const ids = [...S.batchSel];
+    if (!ids.length) return toast("先勾选要打包的模型", "warn");
+    window.location.href = `/api/batch/export.zip?ids=${ids.join(",")}`;
+    toast(`开始打包 ${ids.length} 个模型`);
+  };
+  if ($("#pack-printer")) $("#pack-printer").onchange = (e) => {
+    if (!e.target.value) return;
+    const [w, d] = e.target.value.split(",");
+    $("#pack-w").value = w;
+    $("#pack-d").value = d;
+  };
 }
 
 /* ---- 检测 */
@@ -277,10 +380,19 @@ function renderInspect(stage) {
         <div class="block-sub">每项都带可执行的修复动作</div></div>
       ${body}
     </div>
-    ${rep ? thicknessPanel(rep) : ""}`;
+    ${rep && rep.quality ? scorePanel(rep.quality) : ""}
+    ${rep ? thicknessPanel(rep) : ""}
+    ${rep ? `<div class="block">
+      <div class="block-head"><div class="block-title">截面面积曲线</div>
+        <button class="ghost" id="btn-profile">扫描 40 层</button></div>
+      <div class="block-body" id="profile-body">
+        <div class="queue-empty">点「扫描 40 层」看截面积随高度的变化——突然收窄的地方最容易断</div>
+      </div>
+    </div>` : ""}`;
 
   mountViewer("viewer", S.showOriginal ? "original" : "current");
   $("#btn-scan").onclick = runAnalyze;
+  if ($("#btn-profile")) $("#btn-profile").onclick = loadProfile;
   $("#btn-wire").onclick = (e) => {
     const v = S.viewers[S.viewers.length - 1];
     if (v) e.target.classList.toggle("on", v.toggleWire());
@@ -380,6 +492,73 @@ function renderInspect(stage) {
     S.step = 2; renderSteps(); render();
     toast(`已把「${ACT_LABEL[a] || a}」加到修复队列`);
   });
+}
+
+function scorePanel(q) {
+  const r = 40, c = 2 * Math.PI * r;
+  const off = c * (1 - Math.min(100, q.score) / 100);
+  const color = q.grade === "A" ? "#5dcaa5" : q.grade === "B" ? "#97c459"
+              : q.grade === "C" ? "#ef9f27" : "#e24b4a";
+  return `<div class="block">
+    <div class="block-head"><div class="block-title">网格质量</div>
+      <div class="block-sub">七项检测的综合评分</div></div>
+    <div class="block-body">
+      <div class="score-box">
+        <svg viewBox="0 0 100 100" class="score-gauge">
+          <circle cx="50" cy="50" r="${r}" fill="none" stroke="#1f2430" stroke-width="8"/>
+          <circle cx="50" cy="50" r="${r}" fill="none" stroke="${color}" stroke-width="8"
+            stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"
+            transform="rotate(-90 50 50)" stroke-linecap="round"/>
+          <text x="50" y="46" text-anchor="middle" fill="${color}" font-size="26" font-weight="500">${q.score}</text>
+          <text x="50" y="63" text-anchor="middle" fill="#8b93a5" font-size="11">${q.grade} 级</text>
+        </svg>
+        <div class="score-detail">
+          <div class="score-verdict" style="color:${color}">${q.verdict}</div>
+          ${(q.parts || []).map((p) => `<div class="score-row">
+            <span>${p.name}</span>
+            <div class="score-bar"><i style="width:${(p.score / p.max * 100).toFixed(0)}%;background:${p.score / p.max > 0.8 ? "#5dcaa5" : p.score / p.max > 0.5 ? "#ef9f27" : "#e24b4a"}"></i></div>
+            <b>${p.score}/${p.max}</b>
+          </div>`).join("")}
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function loadProfile() {
+  const box = $("#profile-body");
+  if (!box) return;
+  box.innerHTML = '<div class="queue-empty">扫描中…</div>';
+  try {
+    const d = await api(`/api/projects/${S.pid}/section-profile?layers=40`);
+    const rows = d.layers || [];
+    if (!rows.length) { box.innerHTML = '<div class="queue-empty">没有数据</div>'; return; }
+    const w = 660, h = 170, padL = 44, padR = 12, padT = 12, padB = 26;
+    const maxA = Math.max(...rows.map((r) => r.area), 1);
+    const x = (i) => padL + (w - padL - padR) * i / Math.max(1, rows.length - 1);
+    const y = (a) => h - padB - (h - padT - padB) * (a / maxA);
+    const line = rows.map((r, i) => `${x(i).toFixed(1)},${y(r.area).toFixed(1)}`).join(" ");
+    const area = `M ${x(0).toFixed(1)},${(h - padB).toFixed(1)} L ` +
+      rows.map((r, i) => `${x(i).toFixed(1)},${y(r.area).toFixed(1)}`).join(" L ") +
+      ` L ${x(rows.length - 1).toFixed(1)},${(h - padB).toFixed(1)} Z`;
+    const ticks = [0, 0.5, 1].map((f) => {
+      const a = maxA * f;
+      return `<text x="${padL - 6}" y="${y(a) + 3}" text-anchor="end" fill="#5f6675" font-size="9">${a.toFixed(0)}</text>`;
+    }).join("");
+    box.innerHTML = `
+      <svg viewBox="0 0 ${w} ${h}" class="profile-chart">
+        <line x1="${padL}" y1="${h - padB}" x2="${w - padR}" y2="${h - padB}" stroke="#262b38"/>
+        <path d="${area}" fill="rgba(55,138,221,.14)"/>
+        <polyline points="${line}" fill="none" stroke="#378add" stroke-width="1.5"/>
+        ${ticks}
+        <text x="${padL}" y="${h - 8}" fill="#5f6675" font-size="9">${d.zmin}mm</text>
+        <text x="${w - padR}" y="${h - 8}" text-anchor="end" fill="#5f6675" font-size="9">${d.zmax}mm</text>
+        <text x="${padL - 6}" y="${padT}" text-anchor="end" fill="#5f6675" font-size="9">mm²</text>
+      </svg>
+      <div class="field-help">${d.note}。曲线突然变窄的地方强度最弱，也是最容易断的高度。</div>`;
+  } catch (e) {
+    box.innerHTML = `<div class="queue-empty">扫描失败：${e.message}</div>`;
+  }
 }
 
 function thicknessPanel(rep) {
@@ -656,7 +835,15 @@ function renderProcess(stage) {
       return;
     }
     v.enablePick((pt) => {
-      S.proc.support_points.push(pt);
+      // 点到已有点附近就删掉它，否则新增——比另外做个删除模式顺手
+      const near = S.proc.support_points.findIndex((q) =>
+        Math.hypot(q[0] - pt[0], q[1] - pt[1], q[2] - pt[2]) < 2.0);
+      if (near >= 0) {
+        S.proc.support_points.splice(near, 1);
+        toast("已移除该支撑点");
+      } else {
+        S.proc.support_points.push(pt);
+      }
       S.proc.supports = "manual";
       $("#p-sup").value = "manual";
       v.markPoints(S.proc.support_points, 0x5dcaa5);
@@ -718,6 +905,7 @@ function renderAdvice(stage) {
       </div>
     </div>
     ${a.warnings.length ? `<div class="warn-box">${a.warnings.map((w) => `<div>⚠ ${w}</div>`).join("")}</div>` : ""}
+    ${layerCompare(a)}
     <div class="block">
       <div class="block-head"><div class="block-title">推荐参数</div>
         <div class="block-sub">每条都附推导依据</div></div>
@@ -732,6 +920,34 @@ function renderAdvice(stage) {
     </div>`;
 
   $("#btn-adv2").onclick = loadAdvice;
+}
+
+function layerCompare(a) {
+  const g = a.geometry || {};
+  const base = (a.params || []).find((x) => x.key === "layer_height");
+  const exp = (a.params || []).find((x) => x.key === "exposure");
+  if (!base || !g.height) return "";
+  const cur = Number(base.value) || 0.05;
+  const curExp = Number(exp?.value) || 2.5;
+  const options = [0.03, 0.05, 0.08, 0.1].filter((x) => Math.abs(x - cur) > 1e-6);
+  options.unshift(cur);
+  const rows = options.map((lh) => {
+    const layers = Math.round(g.height / lh);
+    const minutes = (layers * (curExp + 6) + 10 * 30) / 60;
+    const hours = minutes / 60;
+    const tag = Math.abs(lh - cur) < 1e-6 ? '<span class="pill good">推荐</span>' : "";
+    return `<div class="metric-row">
+      <span>${lh}mm ${tag}</span>
+      <b class="dim" style="font-size:10.5px">${layers.toLocaleString()} 层 · ${hours.toFixed(2)} h</b>
+    </div>`;
+  }).join("");
+  return `<div class="block">
+    <div class="block-head"><div class="block-title">层高对比</div>
+      <div class="block-sub">同一模型换层高的层数与耗时</div></div>
+    <div class="block-body">${rows}
+      <div class="field-help">层数按高度 ${g.height.toFixed(1)}mm 折算，每层按「曝光 + 6s 抬升」估算。层高越小表面越细，但时间线性增长。</div>
+    </div>
+  </div>`;
 }
 
 function metric(k, v) {

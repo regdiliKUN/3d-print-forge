@@ -281,6 +281,18 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
 .ec-detail { font-size: 11.5px; color: #e8b4b4; margin-top: 6px; line-height: 1.7; }
 .ec-actions { display: flex; gap: 7px; margin-top: 10px; flex-wrap: wrap; }
 
+/* ---------------------------------------------------------------- 质量评分 */
+.score-box { display: flex; gap: 20px; align-items: center; }
+.score-gauge { width: 118px; height: 118px; flex: 0 0 118px; }
+.score-detail { flex: 1; min-width: 0; }
+.score-verdict { font-size: 12.5px; margin-bottom: 10px; }
+.score-row { display: flex; align-items: center; gap: 8px; font-size: 11px; margin-bottom: 5px; }
+.score-row span { width: 52px; color: var(--muted); flex: 0 0 52px; }
+.score-row b { width: 42px; text-align: right; font: 10px var(--mono); color: var(--dim); font-weight: 400; }
+.score-bar { flex: 1; height: 5px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
+.score-bar i { display: block; height: 100%; border-radius: 3px; }
+.profile-chart { width: 100%; height: auto; display: block; }
+
 /* ---------------------------------------------------------------- 热力图色标 */
 .heat-scale { display: flex; align-items: center; gap: 9px; margin-top: 10px; }
 .hs-bar { flex: 1; height: 8px; border-radius: 4px; border: 1px solid var(--line); }
@@ -338,6 +350,16 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
 .project-row:hover { border-color: var(--accent-dim); }
 .project-row.active { border-color: var(--accent); background: #101c18; }
 .project-name { flex: 1; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fav { cursor: pointer; font-size: 14px; color: var(--dim); flex: 0 0 auto; }
+.fav.on { color: var(--warn); }
+.pill.tag { background: #14251c; color: #7bc99a; }
+.row-ops { display: flex; gap: 4px; opacity: 0; transition: opacity .15s; }
+.project-row:hover .row-ops { opacity: 1; }
+.row-ops button {
+  font-size: 10px; padding: 1px 6px; border-radius: 4px;
+  border: 1px solid var(--line); color: var(--dim);
+}
+.row-ops button:hover { border-color: var(--accent); color: var(--accent); }
 .project-meta { font-size: 10.5px; color: var(--dim); font-family: var(--mono); }
 .pill { font-size: 10px; padding: 1px 7px; border-radius: 9px; background: var(--panel); color: var(--dim); }
 .pill.bad { background: #2c1414; color: var(--error); }
