@@ -101,6 +101,35 @@ def test_act_fill_holes_uses_smooth():
     assert h["boundary"] == 0
 
 
+def _dihedral_std(mesh):
+    V = np.asarray(mesh.vertices)
+    F = np.asarray(mesh.faces)
+    n = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
+    n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-12
+    em = defaultdict(list)
+    for i, t in enumerate(F):
+        for k in range(3):
+            a, b = int(t[k]), int(t[(k + 1) % 3])
+            em[(min(a, b), max(a, b))].append(i)
+    angs = []
+    for fs in em.values():
+        if len(fs) == 2:
+            angs.append(np.degrees(np.arccos(min(1.0, abs(float(n[fs[0]] @ n[fs[1]]))))))
+    return float(np.std(angs)) if angs else 0.0
+
+
+def test_voxel_remesh_taubin_reduces_stair_steps():
+    from app import voxelops
+
+    sphere = trimesh.creation.icosphere(subdivisions=3, radius=20)
+    m0 = voxelops.remesh(sphere, pitch=0.6, smooth_iters=0)
+    m3 = voxelops.remesh(sphere, pitch=0.6, smooth_iters=3)
+    assert _dihedral_std(m3) < _dihedral_std(m0) * 0.85  # 台阶纹明显减少
+    # Taubin 保体积：体积几乎不变
+    assert abs(m3.volume - m0.volume) / max(m0.volume, 1e-9) < 0.02
+    assert m3.is_watertight
+
+
 def test_repair_job_rechecks_and_clears_stale_advice(tmp_path):
     m = _sphere_with_hole()
     p = tmp_path / "hole.stl"

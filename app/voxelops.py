@@ -45,16 +45,49 @@ def grid_to_mesh(grid: np.ndarray, vox, pad: int = 1, positive: bool = True) -> 
     return m
 
 
-def remesh(mesh, pitch: float | None = None) -> trimesh.Trimesh:
-    """体素重网格：能一次性消解自交与非流形，代价是细节量化到 pitch。"""
+def _mesh_edges(faces: np.ndarray) -> np.ndarray:
+    e = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    return np.unique(np.sort(e, axis=1), axis=0)
+
+
+def taubin_smooth(mesh: trimesh.Trimesh, iters: int = 3, lam: float = 0.5, mu: float = -0.53) -> trimesh.Trimesh:
+    """Taubin λ|μ 平滑：去掉 marching cubes 的台阶纹，又不像普通拉普拉斯那样整体缩水。
+
+    λ 步做一次收缩、μ 步（负系数）做一次膨胀，两者配对后体积基本守恒。
+    所有顶点都参与（体素重建出来的是闭合体，没有需要固定的边界）。
+    """
+    from . import gpu
+
+    if iters <= 0:
+        return mesh
+    v = np.asarray(mesh.vertices, dtype=np.float64)
+    f = np.asarray(mesh.faces, dtype=np.int64)
+    if len(v) == 0 or len(f) == 0:
+        return mesh
+    e = _mesh_edges(f)
+    fixed = np.zeros(len(v), dtype=bool)
+    for _ in range(int(iters)):
+        v = gpu.smooth_laplacian(v, e, fixed, iters=1, lam=lam)
+        v = gpu.smooth_laplacian(v, e, fixed, iters=1, lam=mu)
+    return trimesh.Trimesh(vertices=v, faces=f, process=True)
+
+
+def remesh(mesh, pitch: float | None = None, smooth_iters: int = 3) -> trimesh.Trimesh:
+    """体素重网格：能一次性消解自交与非流形，代价是细节量化到 pitch。
+
+    marching cubes 会在斜面/曲面上留下台阶（就是肉眼看到的「层纹」），
+    重建后补一遍 Taubin 平滑把它抹平；smooth_iters=0 可关闭。
+    """
     grid, vox, _ = to_grid(mesh, pitch)
     out = grid_to_mesh(grid, vox)
     if out is None:
         raise ValueError("体素化结果为空，模型可能没有体积")
+    if smooth_iters and smooth_iters > 0:
+        out = taubin_smooth(out, int(smooth_iters))
     return out
 
 
-def thicken(mesh, amount: float, pitch: float | None = None) -> trimesh.Trimesh:
+def thicken(mesh, amount: float, pitch: float | None = None, smooth_iters: int = 2) -> trimesh.Trimesh:
     """沿法线向外补 amount 毫米。
 
     外扩距离场需要足够的空余空间：只补 1 层的话，包围盒外的距离会被截断，
@@ -68,6 +101,8 @@ def thicken(mesh, amount: float, pitch: float | None = None) -> trimesh.Trimesh:
     out = grid_to_mesh(grown, vox, pad=1 + extra)
     if out is None:
         raise ValueError("加厚失败：模型体素为空或完全填满")
+    if smooth_iters and smooth_iters > 0:
+        out = taubin_smooth(out, int(smooth_iters))
     return out
 
 

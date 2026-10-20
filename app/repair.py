@@ -566,8 +566,10 @@ def act_resolve_self_intersection(mesh, params):
     if pitch <= 0:
         pitch = max(0.2, float(max(mesh.extents)) / 220.0)
     faces_before = len(mesh.faces)
-    out = voxelops.remesh(mesh, pitch)
-    return out, {"pitch": round(pitch, 3), "faces_before": faces_before, "faces_after": len(out.faces)}
+    sm = int(params.get("remesh_smooth", 3))
+    out = voxelops.remesh(mesh, pitch, smooth_iters=sm)
+    return out, {"pitch": round(pitch, 3), "faces_before": faces_before,
+                 "faces_after": len(out.faces), "smooth_iters": sm}
 
 
 def act_rescale(mesh, params):
@@ -584,12 +586,14 @@ def act_thicken(mesh, params):
     if amount <= 0:
         return mesh, {"applied": False}
     before = analysis.sample_wall_thickness(mesh, 800)
-    out = voxelops.thicken(mesh, amount)
+    sm = int(params.get("thicken_smooth", 2))
+    out = voxelops.thicken(mesh, amount, smooth_iters=sm)
     after = analysis.sample_wall_thickness(out, 800)
     return out, {
         "delta_mm": amount,
         "min_before": before["min"],
         "min_after": after["min"],
+        "smooth_iters": sm,
         "note": "体素法加厚，锐边会轻微圆化",
     }
 
