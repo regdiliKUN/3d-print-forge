@@ -310,6 +310,7 @@ def create_demo_model() -> dict:
 
 @app.get("/api/projects")
 def list_projects() -> dict:
+    # size_bytes / file_type 已在 store.list_all 里算好
     return {"projects": store.list_all()}
 
 
@@ -1507,13 +1508,26 @@ def split_download(pid: str) -> Response:
 
 
 @app.get("/api/projects/{pid}/advice")
-def advice(pid: str, payload: dict | None = None) -> dict:
+def advice(
+    pid: str,
+    plan: str = Query("balanced"),
+    printer: str | None = Query(None),
+    process: str | None = Query(None),
+    material: str | None = Query(None),
+) -> dict:
     from . import advisor
 
     p = store.get(pid)
     if not p:
         raise HTTPException(404, "项目不存在")
-    return advisor.recommend(p, overrides=payload or {})
+    overrides: dict = {"plan": plan}
+    if printer:
+        overrides["printer"] = printer
+    if process:
+        overrides["process"] = process
+    if material:
+        overrides["material"] = material
+    return advisor.recommend(p, overrides=overrides)
 
 
 # ---------------------------------------------------------------- 任务

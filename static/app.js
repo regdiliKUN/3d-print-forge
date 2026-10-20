@@ -27,7 +27,11 @@ const S = {
   favOnly: false,
   redoStack: [],
   borePoints: [],
+  layout: "list",     // "list" | "grid"（文件列表排布）
+  advicePlan: "balanced", // "aggressive" | "balanced" | "conservative"
 };
+// 记住上次选择的排布方式
+try { S.layout = localStorage.getItem("tpf_layout") === "grid" ? "grid" : "list"; } catch { /* 忽略 */ }
 
 const TOUR_STEPS = [
   { title: "欢迎使用 3D Print Forge",
@@ -209,6 +213,15 @@ function fmtBytes(n) {
   let i = 0;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return n.toFixed(1) + u[i];
+}
+
+/** ISO 时间 → "MM-DD HH:mm"（本地时区），用于文件列表的修改时间 */
+function fmtTime(iso) {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "-";
+  const p = (x) => String(x).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 function fmtEta(s) {
@@ -394,19 +407,46 @@ function renderImport(stage) {
       || (p.tags || []).some((t) => t.toLowerCase().includes(q));
   });
   list = [...list].sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0));
-  const rows = list.map((p) => {
+  const grid = S.layout === "grid";
+  const sevPill = (p) => {
     const sev = p.severity;
     const pill = sev === "error" ? "bad" : sev === "warning" ? "warn" : (sev ? "good" : "");
+    return sev ? `<span class="pill ${pill}">${SEV[sev] || sev}</span>` : '<span class="pill">未检测</span>';
+  };
+  const opsBtns = (p) => `<button data-rename="${p.id}" title="重命名">改名</button>
+      <button data-tag="${p.id}" title="编辑标签">标签</button>`;
+  const rows = list.map((p) => {
+    const tags = (p.tags || []).map((t) => `<span class="pill tag clickable" data-tagfilter="${t}">${t}</span>`).join("");
+    if (grid) {
+      return `<div class="project-card ${p.id === S.pid ? "active" : ""}" data-pid="${p.id}">
+        <div class="pc-top">
+          <span class="fav ${p.favorite ? "on" : ""}" data-fav="${p.id}" title="收藏">${p.favorite ? "★" : "☆"}</span>
+          ${sevPill(p)}
+        </div>
+        <div class="pc-name" title="${p.name}">${p.name}</div>
+        <div class="pc-tags">${tags}</div>
+        <div class="pc-meta">
+          <div><span class="k">类型</span><span class="v">${p.file_type || "?"}</span></div>
+          <div><span class="k">大小</span><span class="v">${fmtBytes(p.size_bytes || 0)}</span></div>
+          <div><span class="k">修改</span><span class="v">${fmtTime(p.updated)}</span></div>
+          <div><span class="k">体积</span><span class="v">${p.volume_cm3 ? p.volume_cm3 + " cm³" : "—"}</span></div>
+        </div>
+        <div class="pc-ops">${opsBtns(p)}</div>
+      </div>`;
+    }
     return `<div class="project-row ${p.id === S.pid ? "active" : ""}" data-pid="${p.id}">
       <span class="fav ${p.favorite ? "on" : ""}" data-fav="${p.id}" title="收藏">${p.favorite ? "★" : "☆"}</span>
-      <span class="project-name">${p.name}</span>
-      ${(p.tags || []).map((t) => `<span class="pill tag clickable" data-tagfilter="${t}">${t}</span>`).join("")}
-      ${sev ? `<span class="pill ${pill}">${SEV[sev] || sev}</span>` : '<span class="pill">未检测</span>'}
-      <span class="project-meta">${p.volume_cm3 ? p.volume_cm3 + "cm³" : ""} ${p.history || 0} 次操作</span>
-      <span class="row-ops">
-        <button data-rename="${p.id}" title="重命名">改名</button>
-        <button data-tag="${p.id}" title="编辑标签">标签</button>
-      </span>
+      <div class="pr-main">
+        <div class="pr-line1"><span class="project-name">${p.name}</span>${tags}${sevPill(p)}</div>
+        <div class="pr-line2">
+          <span class="pm-type">${p.file_type || "?"}</span>
+          <span class="pm-size">${fmtBytes(p.size_bytes || 0)}</span>
+          <span class="pm-time">修改 ${fmtTime(p.updated)}</span>
+          ${p.volume_cm3 ? `<span class="pm-vol">${p.volume_cm3} cm³</span>` : ""}
+          <span class="pm-ops">${p.history || 0} 次操作</span>
+        </div>
+      </div>
+      <span class="row-ops">${opsBtns(p)}</span>
     </div>`;
   }).join("");
 
@@ -422,9 +462,13 @@ function renderImport(stage) {
           <input type="text" id="proj-search" placeholder="搜索名称或标签…" value="${S.search}"
                  style="flex:1;max-width:280px">
           <button class="ghost ${S.favOnly ? "on" : ""}" id="btn-fav-only">只看收藏</button>
+          <div class="layout-switch" id="layout-switch" role="group" aria-label="排列方式">
+            <button class="seg ${grid ? "" : "on"}" data-layout="list" title="纵向列表">☰ 列表</button>
+            <button class="seg ${grid ? "on" : ""}" data-layout="grid" title="网格式">▦ 网格</button>
+          </div>
           <span class="dim" style="font-size:11px">${list.length}/${S.projects.length}</span>
         </div>
-        <div class="project-list">${rows || (S.projects.length === 0
+        <div class="project-list ${grid ? "grid" : ""}">${rows || (S.projects.length === 0
           ? `<div class="empty-guide">
                <div class="eg-title">还没有模型</div>
                <div class="eg-steps">
@@ -498,9 +542,14 @@ function renderImport(stage) {
     </div>`;
 
   $("#btn-add").onclick = () => $("#file-input").click();
-  $$(".project-row", stage).forEach((el) => el.onclick = (e) => {
+  $$(".project-row, .project-card", stage).forEach((el) => el.onclick = (e) => {
     if (e.target.closest("[data-fav],[data-rename],[data-tag]")) return;
     loadProject(el.dataset.pid);
+  });
+  $$("#layout-switch [data-layout]").forEach((el) => el.onclick = () => {
+    S.layout = el.dataset.layout;
+    try { localStorage.setItem("tpf_layout", S.layout); } catch { /* 忽略 */ }
+    render();
   });
   const search = $("#proj-search");
   if (search) {
@@ -1303,6 +1352,19 @@ function renderAdvice(stage) {
     return;
   }
   const g = a.geometry;
+  S.advicePlan = a.plan || S.advicePlan;
+  const plans = a.plans || {};
+  const planOrder = ["aggressive", "balanced", "conservative"];
+  const planBtns = planOrder.filter((k) => plans[k]).map((k) => `
+    <button class="plan-btn ${a.plan === k ? "on" : ""}" data-plan="${k}" title="${plans[k].desc}">${plans[k].label}</button>`).join("");
+  const planDesc = (plans[a.plan] && plans[a.plan].desc) || "";
+  const rationale = (a.rationale || []).map((r) => `<div class="rat-item">• ${r}</div>`).join("");
+  const sources = (a.sources || []).map((s) => `
+    <div class="src-group">
+      <div class="src-title">${s.title}</div>
+      ${(s.items || []).map((it) => `<div class="src-item">${it}</div>`).join("")}
+    </div>`).join("");
+
   stage.innerHTML = `
     ${guideOf("advise")}
     <div class="block">
@@ -1310,6 +1372,11 @@ function renderAdvice(stage) {
         <div class="block-sub">${a.summary}</div></div>
         <button class="ghost" id="btn-adv2">重新生成</button></div>
       <div class="block-body">
+        <div class="plan-switch" id="plan-switch" role="group" aria-label="方案切换">
+          <span class="plan-switch-label">方案</span>
+          ${planBtns}
+        </div>
+        <p class="plan-hint" id="plan-hint">${planDesc}</p>
         <div class="compare-grid">
           <div class="compare-col">
             <h4>用于决策的几何量</h4>
@@ -1328,6 +1395,7 @@ function renderAdvice(stage) {
         </div>
       </div>
     </div>
+    ${rationale ? `<div class="rationale-box"><div class="rat-title">主要判断理由</div>${rationale}</div>` : ""}
     ${a.warnings.length ? `<div class="warn-box">${a.warnings.map((w) => `<div>⚠ ${w}</div>`).join("")}</div>` : ""}
     ${layerCompare(a)}
     <div class="block">
@@ -1348,9 +1416,26 @@ function renderAdvice(stage) {
           </div>
           <div class="advice-reason">${p.reason}</div>
         </div>`).join("")}
+    </div>
+    <div class="block source-panel">
+      <button class="source-toggle" id="btn-sources" aria-expanded="false">
+        <span class="src-caret">▸</span> 参数信息来源
+        <span class="src-sub">数据来源 · 计算依据 · 参考取值</span>
+      </button>
+      <div class="source-body" id="sources-body" hidden>${sources}</div>
     </div>`;
 
   $("#btn-adv2").onclick = loadAdvice;
+  $$("#plan-switch [data-plan]").forEach((el) => el.onclick = () => loadAdvice(el.dataset.plan));
+  const srcBtn = $("#btn-sources");
+  if (srcBtn) srcBtn.onclick = () => {
+    const body = $("#sources-body");
+    const open = body.hidden;
+    body.hidden = !open;
+    srcBtn.setAttribute("aria-expanded", String(open));
+    const caret = srcBtn.querySelector(".src-caret");
+    if (caret) caret.textContent = open ? "▾" : "▸";
+  };
 }
 
 // 建议页的参数能映射到处理参数的只有这几项，其余（层高/曝光/温度）属于切片器设置
@@ -2001,7 +2086,8 @@ async function loadProject(pid) {
   const p = await api(`/api/projects/${pid}`);
   S.project = p;
   S.analysis = p.analysis || null;
-  S.advice = p.advice || null;
+  // 旧格式的建议没有 plans/sources，直接丢弃让用户重新生成，避免半新半旧
+  S.advice = (p.advice && p.advice.plans) ? p.advice : null;
   S.step = S.analysis ? 1 : 1;
   renderSteps(); render();
   bindHelp();
@@ -2461,9 +2547,12 @@ async function loadLayerTimes() {
   }
 }
 
-async function loadAdvice() {
+async function loadAdvice(plan) {
+  // 作为 onclick 直接绑定时第一个参数是事件对象，这里只认字符串方案名
+  const p = (typeof plan === "string" && plan) ? plan : (S.advicePlan || "balanced");
+  S.advicePlan = p;
   try {
-    S.advice = await api(`/api/projects/${S.pid}/advice`);
+    S.advice = await api(`/api/projects/${S.pid}/advice?plan=${encodeURIComponent(p)}`);
     if (S.step !== 4) { S.step = 4; renderSteps(); }
     render();
   } catch (e) { toast("建议生成失败：" + e.message, "err"); }

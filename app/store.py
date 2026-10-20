@@ -96,6 +96,16 @@ def list_all() -> list[dict]:
     for p in sorted(config.PROJECTS.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
         try:
             d = json.loads(p.read_text(encoding="utf-8"))
+            # 文件列表要展示「类型 / 大小」：类型跟显示名走（最贴近用户认知），
+            # 大小优先取原始文件（导入的那个），没有再退回工作副本。
+            orig = Path(d.get("original") or d.get("source") or "")
+            cur = Path(d.get("current") or d.get("source") or "")
+            pick = orig if str(orig) and orig.exists() else cur
+            try:
+                size_bytes = pick.stat().st_size if str(pick) and pick.exists() else 0
+            except OSError:
+                size_bytes = 0
+            suffix = Path(d.get("name") or "").suffix.lower().lstrip(".") or pick.suffix.lower().lstrip(".")
             out.append(
                 {
                     "id": d["id"],
@@ -108,6 +118,8 @@ def list_all() -> list[dict]:
                     "favorite": bool(d.get("favorite")),
                     "tags": d.get("tags") or [],
                     "volume_cm3": round(((d.get("analysis") or {}).get("stats") or {}).get("volume_mm3", 0) / 1000, 2),
+                    "size_bytes": size_bytes,
+                    "file_type": (suffix or "?").upper(),
                 }
             )
         except Exception:
