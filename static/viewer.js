@@ -162,6 +162,15 @@ class Viewer {
     this.camera.updateProjectionMatrix();
   }
 
+  setVertexColors(colors) {
+    if (!this.ok || !this.mesh) return;
+    const T = this.THREE;
+    this.mesh.geometry.setAttribute("color", new T.BufferAttribute(colors, 3));
+    this.mat.vertexColors = true;
+    this.mat.color.set(0xffffff);
+    this.mat.needsUpdate = true;
+  }
+
   setHeatmap(vals, kind) {
     if (!this.ok || !this.mesh) return;
     const T = this.THREE;

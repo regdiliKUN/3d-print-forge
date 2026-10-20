@@ -155,6 +155,12 @@ def run_job(ctx, params):
         for m in meta:
             z.write(out_dir / m["file"], m["file"])
 
+    store.update(pid, assembly={
+        "files": [str(out_dir / m["file"]) for m in meta],
+        "offsets": [m["assembly_offset"] for m in meta],
+        "names": [m["file"] for m in meta],
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    })
     store.add_history(pid, "split", {"max_size": max_size, "axis": p["axis"]}, zip_path,
                       note=f"切成 {len(pieces)} 块")
     ctx.tick(1.0, "分件完成", "done")

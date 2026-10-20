@@ -48,6 +48,19 @@ if not _logger.handlers:
 
 
 @app.middleware("http")
+async def version_rewrite(request, call_next):
+    """把 /api/v1/xxx 改写成 /api/xxx。
+
+    现在只有 v1，但先把入口留出来：以后真要改接口时，
+    老的 /api/v1 可以继续指向兼容实现，客户端不用一起升级。
+    """
+    path = request.url.path
+    if path.startswith("/api/v1/"):
+        request.scope["path"] = "/api/" + path[len("/api/v1/"):]
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def trace_middleware(request, call_next):
     """给每个请求一个 trace id，写进日志和响应头，出问题时能顺着 ID 查。"""
     rid = _uuid.uuid4().hex[:8]
@@ -1287,6 +1300,63 @@ def report_html(pid: str) -> Response:
         media_type="text/html; charset=utf-8",
         headers={"Content-Disposition": f'inline; filename="{Path(p["name"]).stem}_report.html"'},
     )
+
+
+@app.get("/api/projects/{pid}/assembly")
+def project_assembly(pid: str) -> dict:
+    """把分件各块按原始位置摆回去，合并成一个带顶点色的网格——装配预览用。"""
+    import numpy as np
+
+    from . import meshio
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    asm = p.get("assembly")
+    if not asm or not asm.get("files"):
+        raise HTTPException(404, "这个项目还没有分件结果，先在导出页执行分件")
+
+    palette = [
+        (0.22, 0.54, 0.87), (0.36, 0.79, 0.65), (0.94, 0.62, 0.15),
+        (0.66, 0.33, 0.97), (0.89, 0.29, 0.29), (0.45, 0.78, 0.36),
+    ]
+    verts_all, faces_all, colors_all, parts = [], [], [], []
+    base = 0
+    for i, (f, off, name) in enumerate(zip(asm["files"], asm["offsets"], asm["names"])):
+        fp = Path(f)
+        if not fp.exists():
+            continue
+        m = meshio.load_mesh(fp)
+        # 分件时每块被移到 z=0，中心从「原始中心」变成了「h/2」。
+        # 所以不能直接平移 off，要按「目标中心 - 当前中心」算差值。
+        cur = m.bounds.mean(axis=0)
+        m.apply_translation([float(off[0]) - float(cur[0]),
+                             float(off[1]) - float(cur[1]),
+                             float(off[2]) - float(cur[2])])
+        v = np.asarray(m.vertices, dtype=np.float32)
+        fz = np.asarray(m.faces, dtype=np.uint32) + base
+        c = palette[i % len(palette)]
+        verts_all.append(v)
+        faces_all.append(fz)
+        colors_all.append(np.tile(np.array(c, dtype=np.float32), (len(v), 1)))
+        parts.append({"name": name, "faces": int(len(m.faces)), "offset": off,
+                      "color": [round(x, 3) for x in c]})
+        base += len(v)
+
+    if not verts_all:
+        raise HTTPException(404, "分件文件已丢失，请重新分件")
+    verts = np.ascontiguousarray(np.vstack(verts_all), dtype=np.float32)
+    faces = np.ascontiguousarray(np.vstack(faces_all), dtype=np.uint32)
+    colors = np.ascontiguousarray(np.vstack(colors_all), dtype=np.float32)
+    return {
+        "vertices": base64.b64encode(verts.tobytes()).decode(),
+        "indices": base64.b64encode(faces.tobytes()).decode(),
+        "colors": base64.b64encode(colors.tobytes()).decode(),
+        "vertex_count": int(len(verts)),
+        "face_count": int(len(faces)),
+        "parts": parts,
+        "at": asm.get("at"),
+    }
 
 
 @app.get("/api/projects/{pid}/split/download")

@@ -226,6 +226,7 @@ function renderImport(stage) {
           <button class="ghost" id="btn-batch">处理选中（${S.batchSel.size}）</button>
           <button class="ghost" id="btn-pack">拼盘排版（${S.batchSel.size}）</button>
           <button class="ghost" id="btn-zip">打包下载（${S.batchSel.size}）</button>
+          <button class="ghost" id="btn-batch-tag">批量打标签（${S.batchSel.size}）</button>
           <button class="ghost" id="btn-bundle">导出项目包</button>
           <button class="ghost" id="btn-bundle-import">导入项目包</button>
           <input type="file" id="bundle-file" accept=".zip" hidden>
@@ -330,6 +331,29 @@ function renderImport(stage) {
   });
   $("#btn-batch").onclick = runBatch;
   $("#btn-pack").onclick = runPack;
+  if ($("#btn-batch-tag")) $("#btn-batch-tag").onclick = async () => {
+    const ids = [...S.batchSel];
+    if (!ids.length) return toast("先勾选项目", "warn");
+    const raw = prompt("给选中项目加标签（逗号分隔，会追加到已有标签）", "");
+    if (!raw) return;
+    const tags = raw.split(/[,，]/).map((t) => t.trim()).filter(Boolean);
+    if (!tags.length) return;
+    let ok = 0;
+    for (const id of ids) {
+      const cur = S.projects.find((x) => x.id === id);
+      const merged = Array.from(new Set([...((cur && cur.tags) || []), ...tags]));
+      try {
+        await api(`/api/projects/${id}`, {
+          method: "PATCH", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tags: merged }),
+        });
+        ok++;
+      } catch {}
+    }
+    await loadProjects();
+    render();
+    toast(`已给 ${ok}/${ids.length} 个项目加上标签`);
+  };
   if ($("#btn-bundle")) $("#btn-bundle").onclick = () => {
     if (!S.pid) return toast("先选一个项目", "warn");
     window.location.href = `/api/projects/${S.pid}/bundle`;
@@ -1068,6 +1092,13 @@ function renderAdvice(stage) {
     ${a.warnings.length ? `<div class="warn-box">${a.warnings.map((w) => `<div>⚠ ${w}</div>`).join("")}</div>` : ""}
     ${layerCompare(a)}
     <div class="block">
+      <div class="block-head"><div class="block-title">层耗时曲线</div>
+        <button class="ghost" id="btn-layer-times">计算</button></div>
+      <div class="block-body" id="layer-times-body">
+        <div class="queue-empty">点「计算」看每层耗时随高度的变化——截面积大的层明显更慢</div>
+      </div>
+    </div>
+    <div class="block">
       <div class="block-head"><div class="block-title">推荐参数</div>
         <div class="block-sub">每条都附推导依据</div></div>
       ${a.params.map((p) => `
@@ -1264,6 +1295,13 @@ function renderExport(stage) {
           ${["x", "y", "z"].map((a) => `<button class="ghost" data-rot="${a}:-90">${a.toUpperCase()} −90°</button>
             <button class="ghost" data-rot="${a}:90">${a.toUpperCase()} +90°</button>`).join("")}
         </div>
+        <div class="row" style="margin-top:8px">
+          <select id="rot-axis" style="width:80px">
+            <option value="x">X 轴</option><option value="y">Y 轴</option><option value="z">Z 轴</option>
+          </select>
+          <input type="number" id="rot-deg" value="15" step="1" min="-360" max="360" style="width:90px">
+          <button class="ghost" id="btn-rot-free">任意角度旋转</button>
+        </div>
       </div>
     </div>
     <div class="block">
@@ -1297,6 +1335,7 @@ function renderExport(stage) {
         </div>
         <div class="row" style="margin-top:6px">
           <button class="ghost" id="btn-split">执行分件</button>
+          <button class="ghost" id="btn-assembly">装配预览</button>
           <span class="dim" style="font-size:11px">要求模型已水密</span>
         </div>
         <div id="split-result"></div>
@@ -1349,6 +1388,26 @@ function renderExport(stage) {
     mountViewer("view-now", "current");
   }
   $("#btn-split").onclick = runSplit;
+  if ($("#btn-assembly")) $("#btn-assembly").onclick = async (e) => {
+    const v = S.viewers.find((x) => x.el.id === "view-orig") || S.viewers.find((x) => x.el.id === "viewer");
+    if (!v) return toast("预览还没准备好", "warn");
+    try {
+      const d = await api(`/api/projects/${S.pid}/assembly`);
+      v.setGeometry(d.vertices, d.indices);
+      v.setVertexColors(b64ToTyped(d.colors, Float32Array));
+      e.target.classList.add("on");
+      const box = $("#assembly-legend") || (() => {
+        const div = document.createElement("div");
+        div.id = "assembly-legend";
+        div.className = "field-help";
+        e.target.parentElement.after(div);
+        return div;
+      })();
+      box.innerHTML = `装配预览：${d.parts.length} 块按切割位置还原，同色即同一块。`
+        + d.parts.map((p, i) => `<span style="color:rgb(${p.color.map((c) => Math.round(c * 255)).join(",")});margin-left:8px">■ 第${i + 1}块</span>`).join("");
+      toast(`装配预览：${d.parts.length} 块`);
+    } catch (err) { toast("装配预览失败：" + err.message, "err"); }
+  };
   if ($("#btn-diff")) $("#btn-diff").onclick = loadDiff;
   if ($("#btn-undo")) $("#btn-undo").onclick = undoStep;
   if ($("#btn-redo")) $("#btn-redo").onclick = redoStep;
@@ -1502,6 +1561,21 @@ function renderExport(stage) {
       await loadProjects();
       render();
     } catch (e) { toast("居中失败：" + e.message, "err"); }
+  };
+  if ($("#btn-rot-free")) $("#btn-rot-free").onclick = async () => {
+    const axis = $("#rot-axis").value;
+    const deg = Number($("#rot-deg").value);
+    if (!deg) return toast("角度不能为 0", "warn");
+    try {
+      const r = await api(`/api/projects/${S.pid}/rotate`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ axis, degrees: deg }),
+      });
+      toast(`绕 ${axis.toUpperCase()} 转 ${deg}°，新尺寸 ${r.extents.map((x) => x.toFixed(1)).join("×")}mm`);
+      S.project = await api(`/api/projects/${S.pid}`);
+      await loadProjects();
+      render();
+    } catch (e) { toast("旋转失败：" + e.message, "err"); }
   };
   $$("[data-rot]", stage).forEach((el) => el.onclick = async () => {
     const [axis, deg] = el.dataset.rot.split(":");
@@ -2000,6 +2074,38 @@ async function loadHeat(kind) {
     $("#btn-supd").classList.toggle("on", kind === "support");
   } catch (e) {
     toast("热力图生成失败：" + e.message, "err");
+  }
+}
+
+async function loadLayerTimes() {
+  const box = $("#layer-times-body");
+  if (!box) return;
+  box.innerHTML = '<div class="queue-empty">计算中…</div>';
+  try {
+    const lh = Number(($("#adv-params") || {}).value) || 0.05;
+    const d = await api(`/api/projects/${S.pid}/layer-times?samples=40&layer_h=${lh}`);
+    const rows = d.layers || [];
+    if (!rows.length) { box.innerHTML = '<div class="queue-empty">没有数据</div>'; return; }
+    const w = 660, h = 150, padL = 46, padR = 12, padT = 12, padB = 26;
+    const maxS = Math.max(...rows.map((r) => r.seconds), 1);
+    const minS = Math.min(...rows.map((r) => r.seconds));
+    const x = (i) => padL + (w - padL - padR) * i / Math.max(1, rows.length - 1);
+    const y = (v) => h - padB - (h - padT - padB) * ((v - minS) / Math.max(maxS - minS, 0.1));
+    const line = rows.map((r, i) => `${x(i).toFixed(1)},${y(r.seconds).toFixed(1)}`).join(" ");
+    box.innerHTML = `
+      <svg viewBox="0 0 ${w} ${h}" class="profile-chart">
+        <line x1="${padL}" y1="${h - padB}" x2="${w - padR}" y2="${h - padB}" stroke="#262b38"/>
+        <polyline points="${line}" fill="none" stroke="#ef9f27" stroke-width="1.5"/>
+        <text x="${padL - 6}" y="${padT + 4}" text-anchor="end" fill="#5f6675" font-size="9">${maxS.toFixed(0)}s</text>
+        <text x="${padL - 6}" y="${h - padB}" text-anchor="end" fill="#5f6675" font-size="9">${minS.toFixed(0)}s</text>
+        <text x="${padL}" y="${h - 8}" fill="#5f6675" font-size="9">${d.layers[0].z}mm</text>
+        <text x="${w - padR}" y="${h - 8}" text-anchor="end" fill="#5f6675" font-size="9">${d.layers[d.layers.length - 1].z}mm</text>
+      </svg>
+      <div class="metric-row"><span class="dim">总层数 / 层高</span><b>${d.total_layers.toLocaleString()} 层 · ${d.layer_height}mm</b></div>
+      <div class="metric-row"><span class="dim">平均每层 / 总时长</span><b>${d.avg_seconds}s · ${d.est_hours}h</b></div>
+      <div class="field-help">${d.note}。曲线高处的层截面积大，扫描时间更长。</div>`;
+  } catch (e) {
+    box.innerHTML = `<div class="queue-empty">计算失败：${e.message}</div>`;
   }
 }
 
