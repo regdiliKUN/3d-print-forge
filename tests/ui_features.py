@@ -56,6 +56,13 @@ def main() -> int:
         page.wait_for_selector(".report-item", timeout=90000)
         time.sleep(2)
 
+        # ---- 三角面质量分布
+        page.locator("#btn-tri-hist").click()
+        page.wait_for_function(
+            "() => (document.querySelector('#tri-hist-body')?.textContent || '').includes('三角形总数')",
+            timeout=30000)
+        check("三角面直方图", "三角形总数" in page.inner_text("#tri-hist-body"))
+
         # ---- 质量评分 + 壁厚分布条
         has_score = page.locator(".score-gauge").count() > 0
         check("质量评分仪表已渲染", has_score)

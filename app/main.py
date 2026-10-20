@@ -402,6 +402,105 @@ def split_project(pid: str, payload: dict = Body(...)) -> dict:
     return _spawn("split", f"分件 {p['name']}", payload, split_mod.run_job, pid)
 
 
+@app.post("/api/projects/{pid}/boolean")
+def boolean_project(pid: str, payload: dict = Body(...)) -> dict:
+    """两件之间做并集 / 差集 / 交集。结果覆盖当前工作副本，原版本仍在历史里。"""
+    import trimesh
+
+    from . import meshio
+
+    op = str(payload.get("op", "union"))
+    if op not in ("union", "difference", "intersection"):
+        raise HTTPException(400, "op 只能是 union / difference / intersection")
+    other_id = str(payload.get("other_id") or "")
+    if not other_id or other_id == pid:
+        raise HTTPException(400, "需要选择另一个不同的模型")
+
+    pa, pb = store.get(pid), store.get(other_id)
+    if not pa or not pb:
+        raise HTTPException(404, "项目不存在")
+    fa = Path(pa.get("current") or pa.get("source") or "")
+    fb = Path(pb.get("current") or pb.get("source") or "")
+    if not fa.exists() or not fb.exists():
+        raise HTTPException(404, "模型文件不存在")
+
+    a = meshio.load_mesh(fa)
+    b = meshio.load_mesh(fb)
+    if not a.is_watertight or not b.is_watertight:
+        raise HTTPException(400, "布尔运算要求两个模型都水密，请先修复")
+
+    # 默认沿 X 并排放置；difference / intersection 需要重叠，传 overlap=true 就不挪
+    if not payload.get("overlap"):
+        gap = float(payload.get("gap", 2.0))
+        shift = float(a.extents[0]) / 2 + float(b.extents[0]) / 2 + gap
+        b = b.copy()
+        b.apply_translation([shift, 0, 0])
+    offset = payload.get("offset")
+    if isinstance(offset, (list, tuple)) and len(offset) == 3:
+        b = b.copy()
+        b.apply_translation([float(x) for x in offset])
+
+    try:
+        if op == "union":
+            r = trimesh.boolean.union([a, b], engine="manifold")
+        elif op == "difference":
+            r = trimesh.boolean.difference([a, b], engine="manifold")
+        else:
+            r = trimesh.boolean.intersection([a, b], engine="manifold")
+    except Exception as e:
+        raise HTTPException(500, f"布尔运算失败：{e}") from e
+    if r is None or len(r.faces) == 0:
+        raise HTTPException(400, "运算结果为空——两个模型可能没有交集")
+
+    r.apply_translation([0, 0, -float(r.bounds[0][2])])
+    out = config.OUTPUTS / f"{pid}_bool_{op}_{int(_time.time())}.stl"
+    r.export(str(out))
+    label = {"union": "并集", "difference": "差集", "intersection": "交集"}[op]
+    store.add_history(pid, f"boolean_{op}", {"other_id": other_id}, out,
+                      note=f"与 {pb['name']} 做{label}")
+    return {
+        "ok": True, "output": str(out), "op": op, "label": label,
+        "faces": int(len(r.faces)),
+        "volume_mm3": round(float(r.volume), 1),
+        "extents": [round(float(x), 2) for x in r.extents],
+        "watertight": bool(r.is_watertight),
+    }
+
+
+@app.post("/api/projects/{pid}/merge")
+def merge_projects(pid: str, payload: dict = Body(...)) -> dict:
+    """把多个模型直接合并成一个网格（不做布尔），保留各自相对位置。"""
+    import trimesh
+
+    from . import meshio
+
+    ids = [str(x) for x in (payload.get("project_ids") or [])]
+    if pid not in ids:
+        ids.insert(0, pid)
+    if len(ids) < 2:
+        raise HTTPException(400, "至少要选两个模型")
+    meshes = []
+    names = []
+    for x in ids:
+        p = store.get(x)
+        if not p:
+            continue
+        f = Path(p.get("current") or p.get("source") or "")
+        if not f.exists():
+            continue
+        meshes.append(meshio.load_mesh(f))
+        names.append(p["name"])
+    if len(meshes) < 2:
+        raise HTTPException(400, "可用模型不足两个")
+    r = trimesh.util.concatenate(meshes)
+    r.apply_translation([0, 0, -float(r.bounds[0][2])])
+    out = config.OUTPUTS / f"{pid}_merged_{int(_time.time())}.stl"
+    r.export(str(out))
+    store.add_history(pid, "merge", {"ids": ids}, out, note=f"合并 {len(meshes)} 件")
+    return {"ok": True, "output": str(out), "faces": int(len(r.faces)),
+            "count": len(meshes), "names": names}
+
+
 @app.get("/api/projects/{pid}/section-profile")
 def section_profile(pid: str, layers: int = Query(40, ge=5, le=200)) -> dict:
     """沿 Z 轴等距切若干层，返回每层截面积——画成曲线能看出哪里突然收窄或塌陷。"""
@@ -624,6 +723,27 @@ def project_diff(pid: str, tol: float = Query(0.05, ge=0.0, le=10.0)) -> dict:
     if not Path(a).exists() or not Path(b).exists():
         raise HTTPException(404, "版本文件已不存在")
     return compare.diff_files(Path(a), Path(b), tol)
+
+
+@app.post("/api/projects/{pid}/checkout")
+def project_checkout(pid: str, payload: dict = Body(...)) -> dict:
+    """把工作副本切到指定文件（重做用）。只允许指向本项目产出的目录。"""
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    raw = str(payload.get("path") or "")
+    if not raw:
+        raise HTTPException(400, "缺少 path")
+    target = Path(raw).resolve()
+    allowed = [config.OUTPUTS.resolve(), config.UPLOADS.resolve()]
+    # 只允许落在产出目录里，防止把任意文件设成工作副本
+    if not any(target.is_relative_to(a) for a in allowed):
+        raise HTTPException(400, "路径不在允许的目录内")
+    if not target.exists():
+        raise HTTPException(404, "目标文件不存在")
+    store.update(pid, current=str(target))
+    store.add_history(pid, "checkout", {"path": str(target)}, target, note="重做")
+    return {"ok": True, "current": str(target)}
 
 
 @app.post("/api/projects/{pid}/revert")
@@ -966,7 +1086,7 @@ def batch_report() -> dict:
 
 # ---------------------------------------------------------------- 导出
 @app.get("/api/projects/{pid}/download")
-def download(pid: str, kind: str = Query("stl", pattern="^(stl|3mf|config|log|report|slicer)$")) -> Response:
+def download(pid: str, kind: str = Query("stl", pattern="^(stl|3mf|obj|ply|config|log|report|slicer)$")) -> Response:
     p = store.get(pid)
     if not p:
         raise HTTPException(404, "项目不存在")
@@ -975,6 +1095,24 @@ def download(pid: str, kind: str = Query("stl", pattern="^(stl|3mf|config|log|re
         if not src.exists():
             raise HTTPException(404, "模型文件不存在")
         return FileResponse(src, media_type="model/stl", filename=f"{Path(p['name']).stem}_processed.stl")
+    if kind in ("obj", "ply"):
+        from . import meshio
+
+        src = Path(p.get("current") or p["source"])
+        if not src.exists():
+            raise HTTPException(404, "模型文件不存在")
+        try:
+            m = meshio.load_mesh(src)
+            buf = io.BytesIO()
+            m.export(buf, file_type=kind)
+        except Exception as e:
+            raise HTTPException(500, f"{kind.upper()} 导出失败：{e}") from e
+        media = "text/plain" if kind == "obj" else "application/octet-stream"
+        return Response(
+            buf.getvalue(),
+            media_type=media,
+            headers={"Content-Disposition": f'attachment; filename="{Path(p["name"]).stem}.{kind}"'},
+        )
     if kind == "3mf":
         from . import meshio
 

@@ -25,6 +25,7 @@ const S = {
   batchSel: new Set(),
   search: "",
   favOnly: false,
+  redoStack: [],
 };
 
 const PRESETS = {
@@ -382,6 +383,13 @@ function renderInspect(stage) {
     </div>
     ${rep && rep.quality ? scorePanel(rep.quality) : ""}
     ${rep ? thicknessPanel(rep) : ""}
+    <div class="block">
+      <div class="block-head"><div class="block-title">三角面质量分布</div>
+        <button class="ghost" id="btn-tri-hist">统计</button></div>
+      <div class="block-body" id="tri-hist-body">
+        <div class="queue-empty">点「统计」看三角形面积分布——大量极小的面会拖慢切片</div>
+      </div>
+    </div>
     ${rep ? `<div class="block">
       <div class="block-head"><div class="block-title">截面面积曲线</div>
         <button class="ghost" id="btn-profile">扫描 40 层</button></div>
@@ -393,6 +401,7 @@ function renderInspect(stage) {
   mountViewer("viewer", S.showOriginal ? "original" : "current");
   $("#btn-scan").onclick = runAnalyze;
   if ($("#btn-profile")) $("#btn-profile").onclick = loadProfile;
+  if ($("#btn-tri-hist")) $("#btn-tri-hist").onclick = renderTriHist;
   $("#btn-wire").onclick = (e) => {
     const v = S.viewers[S.viewers.length - 1];
     if (v) e.target.classList.toggle("on", v.toggleWire());
@@ -523,6 +532,60 @@ function scorePanel(q) {
       </div>
     </div>
   </div>`;
+}
+
+function renderTriHist() {
+  const box = $("#tri-hist-body");
+  const d = S.meshData;
+  if (!box || !d) { toast("模型还没加载完", "warn"); return; }
+  const verts = b64ToTyped(d.vertices, Float32Array);
+  const idx = b64ToTyped(d.indices, Uint32Array);
+  const n = idx.length / 3;
+  const areas = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = idx[i * 3] * 3, b = idx[i * 3 + 1] * 3, c = idx[i * 3 + 2] * 3;
+    const ux = verts[b] - verts[a], uy = verts[b + 1] - verts[a + 1], uz = verts[b + 2] - verts[a + 2];
+    const vx = verts[c] - verts[a], vy = verts[c + 1] - verts[a + 1], vz = verts[c + 2] - verts[a + 2];
+    const cx = uy * vz - uz * vy, cy = uz * vx - ux * vz, cz = ux * vy - uy * vx;
+    areas[i] = 0.5 * Math.hypot(cx, cy, cz);
+  }
+  const sorted = Array.from(areas).sort((x, y) => x - y);
+  const q = (p) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+  const p50 = q(0.5), p95 = q(0.95), p999 = q(0.999);
+  const tiny = sorted.filter((x) => x < 0.01).length;
+  const huge = sorted.filter((x) => x > p50 * 20).length;
+
+  // 对数分桶
+  const bins = 18;
+  const lo = Math.log10(Math.max(sorted[0], 1e-6));
+  const hi = Math.log10(Math.max(sorted[sorted.length - 1], 1e-5));
+  const counts = new Array(bins).fill(0);
+  for (const a of areas) {
+    const t = (Math.log10(Math.max(a, 1e-6)) - lo) / Math.max(hi - lo, 1e-6);
+    counts[Math.min(bins - 1, Math.max(0, Math.floor(t * bins)))]++;
+  }
+  const maxC = Math.max(...counts, 1);
+  const w = 640, h = 120, bw = w / bins;
+  const bars = counts.map((c, i) => {
+    const bh = (c / maxC) * (h - 18);
+    return `<rect x="${(i * bw).toFixed(1)}" y="${(h - 18 - bh).toFixed(1)}" width="${(bw - 1.5).toFixed(1)}"
+      height="${bh.toFixed(1)}" fill="#378add" opacity=".75" rx="1"/>`;
+  }).join("");
+
+  box.innerHTML = `
+    <svg viewBox="0 0 ${w} ${h}" class="profile-chart">
+      ${bars}
+      <line x1="0" y1="${h - 18}" x2="${w}" y2="${h - 18}" stroke="#262b38"/>
+      <text x="2" y="${h - 6}" fill="#5f6675" font-size="9">${Math.pow(10, lo).toFixed(3)} mm²</text>
+      <text x="${w - 2}" y="${h - 6}" text-anchor="end" fill="#5f6675" font-size="9">${Math.pow(10, hi).toFixed(1)} mm²</text>
+    </svg>
+    <div class="metric-row"><span class="dim">三角形总数</span><b>${n.toLocaleString()}</b></div>
+    <div class="metric-row"><span class="dim">中位面积 / P95</span><b>${p50.toFixed(4)} / ${p95.toFixed(4)} mm²</b></div>
+    <div class="metric-row"><span class="dim">极小面（&lt;0.01mm²）</span><b style="color:${tiny > n * 0.05 ? "#ef9f27" : "#5dcaa5"}">${tiny.toLocaleString()} 个（${(tiny / n * 100).toFixed(1)}%）</b></div>
+    <div class="metric-row"><span class="dim">超大面（&gt;20×中位）</span><b>${huge.toLocaleString()} 个</b></div>
+    <div class="field-help">${tiny > n * 0.05
+      ? "极小面占比偏高，切片时会生成大量空走路径。建议先做一次减面或体素重网格。"
+      : "面尺寸分布正常，切片负担不大。"}</div>`;
 }
 
 async function loadProfile() {
@@ -976,6 +1039,38 @@ function renderExport(stage) {
       </div>
     </div>` : ""}
     <div class="block">
+      <div class="block-head"><div class="block-title">布尔运算 / 合并</div>
+        <div class="block-sub">两件之间做并集、差集、交集，或直接合并成一个网格</div></div>
+      <div class="block-body">
+        <div class="field-row">
+          <div class="field">
+            <div class="field-top"><span class="field-label">另一个模型</span></div>
+            <select id="bool-other">
+              <option value="">选择…</option>
+              ${S.projects.filter((x) => x.id !== S.pid)
+                .map((x) => `<option value="${x.id}">${x.name}</option>`).join("")}
+            </select>
+          </div>
+          <div class="field">
+            <div class="field-top"><span class="field-label">放置方式</span></div>
+            <select id="bool-layout">
+              <option value="side">并排（间隔 2mm）</option>
+              <option value="overlap">重合（差集/交集用）</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <button class="ghost" data-bool="union">并集</button>
+          <button class="ghost" data-bool="difference">差集</button>
+          <button class="ghost" data-bool="intersection">交集</button>
+          <button class="ghost" id="btn-merge">直接合并</button>
+        </div>
+        <div class="field-help" style="margin-top:8px">
+          布尔运算要求两个模型都水密。差集和交集需要「重合」放置才有结果。
+        </div>
+      </div>
+    </div>
+    <div class="block">
       <div class="block-head"><div class="block-title">姿态微调</div>
         <div class="block-sub">按 90° 步进转，转完自动落到平台</div></div>
       <div class="block-body">
@@ -1033,6 +1128,8 @@ function renderExport(stage) {
           <button class="ghost" data-dl="log">下载操作日志</button>
           <button class="ghost" data-dl="html">HTML 报告</button>
           <button class="ghost" data-dl="slicer">切片参数配置</button>
+          <button class="ghost" data-dl="obj">导出 OBJ</button>
+          <button class="ghost" data-dl="ply">导出 PLY</button>
         </div>
         <div class="field-help" style="margin-top:8px">3MF 保留单位和多体结构，比 STL 更适合交给现代切片软件。</div>
       </div>
@@ -1055,7 +1152,8 @@ function renderExport(stage) {
         </div>`).join("")
         : '<div class="queue-empty">还没有操作记录</div>'}
         ${hist.length ? `<div class="row" style="margin-top:10px">
-          <button class="ghost" id="btn-undo">撤销一步（Ctrl+Z）</button>
+          <button class="ghost" id="btn-undo">撤销（Ctrl+Z）</button>
+          <button class="ghost" id="btn-redo">重做（Ctrl+Y）</button>
           <button class="ghost" data-revert="-1">回到导入时</button></div>` : ""}
       </div>
     </div>`;
@@ -1067,6 +1165,38 @@ function renderExport(stage) {
   $("#btn-split").onclick = runSplit;
   if ($("#btn-diff")) $("#btn-diff").onclick = loadDiff;
   if ($("#btn-undo")) $("#btn-undo").onclick = undoStep;
+  if ($("#btn-redo")) $("#btn-redo").onclick = redoStep;
+  $$("[data-bool]", stage).forEach((el) => el.onclick = async () => {
+    const other = $("#bool-other")?.value;
+    if (!other) return toast("先选另一个模型", "warn");
+    const overlap = $("#bool-layout")?.value === "overlap";
+    el.disabled = true;
+    try {
+      const r = await api(`/api/projects/${S.pid}/boolean`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: el.dataset.bool, other_id: other, overlap }),
+      });
+      toast(`${r.label}完成：${r.faces.toLocaleString()} 面，${(r.volume_mm3 / 1000).toFixed(2)} cm³`);
+      S.project = await api(`/api/projects/${S.pid}`);
+      await loadProjects();
+      render();
+    } catch (e) { toast("布尔运算失败：" + e.message, "err"); }
+    finally { el.disabled = false; }
+  });
+  if ($("#btn-merge")) $("#btn-merge").onclick = async () => {
+    const other = $("#bool-other")?.value;
+    if (!other) return toast("先选另一个模型", "warn");
+    try {
+      const r = await api(`/api/projects/${S.pid}/merge`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_ids: [other] }),
+      });
+      toast(`已合并 ${r.count} 件，共 ${r.faces.toLocaleString()} 面`);
+      S.project = await api(`/api/projects/${S.pid}`);
+      await loadProjects();
+      render();
+    } catch (e) { toast("合并失败：" + e.message, "err"); }
+  };
   $$("[data-rot]", stage).forEach((el) => el.onclick = async () => {
     const [axis, deg] = el.dataset.rot.split(":");
     try {
@@ -1122,6 +1252,7 @@ function mountViewer(elId, which = "current") {
       const m = await api(`/api/projects/${S.pid}/mesh?which=${which}&max_faces=40000`);
       v.setGeometry(m.vertices, m.indices);
       if (m.bbox) S.modelBBox = m.bbox;
+      S.meshData = { vertices: m.vertices, indices: m.indices, stats: m.stats };
       const st = m.stats || {};
       const tag = document.getElementById(elId + "-stat");
       if (tag) {
@@ -1375,12 +1506,31 @@ async function loadDiff() {
 function undoStep() {
   const h = (S.project?.history) || [];
   if (!h.length) { toast("没有可撤销的操作", "warn"); return; }
+  // 记下当前版本，redo 才能回去
+  if (S.project?.current) S.redoStack.push(S.project.current);
+  if (S.redoStack.length > 30) S.redoStack.shift();
   // 从后往前找第一条不是 revert 的记录——revert 本身也会进历史，
   // 不跳过的话连续撤销会一直在 revert 记录之间来回弹
   for (let i = h.length - 2; i >= 0; i--) {
     if (h[i].action !== "revert") { doRevert(i); return; }
   }
   doRevert(-1);
+}
+
+async function redoStep() {
+  if (!S.redoStack.length) { toast("没有可重做的操作", "warn"); return; }
+  const target = S.redoStack.pop();
+  try {
+    await api(`/api/projects/${S.pid}/checkout`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: target }),
+    });
+    S.project = await api(`/api/projects/${S.pid}`);
+    S.analysis = S.project.analysis || null;
+    await loadProjects();
+    render();
+    toast("已重做");
+  } catch (e) { toast("重做失败：" + e.message, "err"); }
 }
 
 async function doRevert(index) {
@@ -1714,6 +1864,11 @@ async function boot() {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) {
       e.preventDefault();
       undoStep();
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "y"
+        || (e.key.toLowerCase() === "z" && e.shiftKey))) {
+      e.preventDefault();
+      redoStep();
     }
   });
 }
