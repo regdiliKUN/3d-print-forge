@@ -215,6 +215,24 @@ def set_config(payload: dict = Body(...)) -> dict:
     return {"ok": True, "runtime": asdict(c.runtime), "thresholds": asdict(c.thresholds)}
 
 
+@app.get("/api/shortcut")
+def shortcut_info() -> dict:
+    """桌面快捷方式当前状态（是否存在、桌面路径、启动器路径）。"""
+    from . import shortcut
+
+    return shortcut.shortcut_status()
+
+
+@app.post("/api/shortcut")
+def make_shortcut() -> dict:
+    """在桌面创建/覆盖一键启动的快捷方式（目标在项目所在盘，如 I 盘）。"""
+    from . import shortcut
+
+    result = shortcut.create_desktop_shortcut()
+    _logger.info("创建桌面快捷方式：%s", result)
+    return result
+
+
 @app.get("/api/workflow")
 def workflow() -> dict:
     return {"steps": WORKFLOW}

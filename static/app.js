@@ -110,7 +110,9 @@ function showShortcuts() {
     <p class="dim" style="font-size:11.5px;margin-top:14px">
       每个步骤页顶部的说明会随步骤变化；参数下方的灰字就是该参数的取值建议。
     </p>
+    <p class="dim" id="help-shortcut-status" style="font-size:11.5px;margin-top:8px"></p>
     <div class="tour-actions">
+      <button class="ghost" id="help-shortcut">在桌面创建快捷方式</button>
       <button class="ghost" id="help-tour">重新看引导</button>
       <span class="spacer"></span>
       <button class="primary" id="help-close">知道了</button>
@@ -120,6 +122,37 @@ function showShortcuts() {
   document.body.appendChild(ov);
   $("#help-close").onclick = () => ov.remove();
   $("#help-tour").onclick = () => { ov.remove(); showTour(true); };
+  $("#help-shortcut").onclick = (e) => createDesktopShortcut(e.currentTarget, $("#help-shortcut-status"));
+  refreshShortcutStatus($("#help-shortcut-status"));
+}
+
+/** 查一下桌面快捷方式建没建，更新一行状态文案 */
+async function refreshShortcutStatus(el) {
+  if (!el) return;
+  try {
+    const d = await (await fetch("/api/shortcut")).json();
+    if (!d.supported) { el.textContent = "桌面快捷方式仅支持 Windows。"; return; }
+    if (d.exists) el.textContent = `✓ 已在桌面创建：${d.lnk}`;
+    else el.textContent = d.desktop ? `将创建到：${d.desktop}` : "未找到桌面目录（可能被 OneDrive 重定向）。";
+  } catch { el.textContent = ""; }
+}
+
+/** 点一下 → 后端在桌面建 .lnk（目标在 I 盘启动器），成功后提示路径 */
+async function createDesktopShortcut(btn, statusEl) {
+  if (btn) { btn.disabled = true; btn.dataset.old = btn.textContent; btn.textContent = "创建中…"; }
+  try {
+    const d = await (await fetch("/api/shortcut", { method: "POST" })).json();
+    if (d.ok) {
+      toast("桌面快捷方式已创建，双击图标即可启动", "ok");
+      if (statusEl) statusEl.textContent = `✓ 已在桌面创建：${d.lnk}`;
+    } else {
+      toast(`创建失败：${d.error || "未知错误"}`, "err");
+    }
+  } catch (e) {
+    toast(`创建失败：${e.message}`, "err");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = btn.dataset.old || "在桌面创建快捷方式"; }
+  }
 }
 
 const PRESETS = {
@@ -398,8 +431,10 @@ function renderImport(stage) {
                  <div><b>1</b> 把 STL 拖进这个窗口</div>
                  <div><b>2</b> 或者点下面的「加载示例模型」，用带缺陷的样件走一遍流程</div>
                  <div><b>3</b> 不确定从哪开始？点右上角的 <kbd>?</kbd> 看引导</div>
+                 <div><b>4</b> 想在桌面放个一键启动图标？点下面的「创建桌面快捷方式」</div>
                </div>
                <button class="primary" id="btn-demo-empty">加载示例模型</button>
+               <button class="ghost" id="btn-shortcut-empty">创建桌面快捷方式</button>
              </div>`
           : '<div class="queue-empty">没有匹配的模型</div>')}</div>
       </div>
@@ -1634,6 +1669,7 @@ function renderExport(stage) {
   };
   if ($("#btn-demo")) $("#btn-demo").onclick = loadDemo;
   if ($("#btn-demo-empty")) $("#btn-demo-empty").onclick = loadDemo;
+  if ($("#btn-shortcut-empty")) $("#btn-shortcut-empty").onclick = (e) => createDesktopShortcut(e.currentTarget, null);
   $("#btn-split").onclick = runSplit;
   if ($("#btn-gap")) $("#btn-gap").onclick = async (e) => {
     try {
