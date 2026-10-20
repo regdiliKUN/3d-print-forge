@@ -258,6 +258,38 @@ async def upload(files: list[UploadFile] = File(...)) -> dict:
     return {"projects": created}
 
 
+@app.post("/api/demo")
+def create_demo_model() -> dict:
+    """生成一个带典型缺陷的示例模型，新用户点一下就能走完整流程。
+
+    故意做进四类问题：破洞、薄壁、碎屑、法线反转——
+    这样检测报告、一键修复、热力图这些功能都有东西可看。
+    """
+    import numpy as np
+    import trimesh
+
+    body = trimesh.creation.icosphere(subdivisions=3, radius=20)
+    keep = np.ones(len(body.faces), dtype=bool)
+    keep[:6] = False  # 挖掉几片造成破洞
+    body.update_faces(keep)
+
+    # 0.5mm：明显低于 0.8mm 告警线，检测一定报出来（0.8 正好压在线上容易被判通过）
+    thin = trimesh.creation.box(extents=(28, 28, 0.5))
+    thin.apply_translation([0, 0, 22])
+
+    debris = trimesh.creation.box(extents=(1.2, 1.2, 1.2))  # 碎屑
+    debris.apply_translation([36, 0, 0])
+
+    m = trimesh.util.concatenate([body, thin, debris])
+    m.invert()  # 整体法线反转，模拟导出错误
+
+    dest = config.UPLOADS / f"demo_{uuid.uuid4().hex[:8]}.stl"
+    m.export(str(dest))
+    proj = store.create("示例模型（破洞 / 薄壁 / 碎屑）", dest)
+    store.update(proj["id"], tags=["示例"])
+    return store.get(proj["id"]) or {}
+
+
 @app.get("/api/projects")
 def list_projects() -> dict:
     return {"projects": store.list_all()}

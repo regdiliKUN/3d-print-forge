@@ -281,6 +281,56 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
 .ec-detail { font-size: 11.5px; color: #e8b4b4; margin-top: 6px; line-height: 1.7; }
 .ec-actions { display: flex; gap: 7px; margin-top: 10px; flex-wrap: wrap; }
 
+/* ---------------------------------------------------------------- 引导与帮助 */
+.help-btn {
+  margin-left: 12px; width: 22px; height: 22px; border-radius: 50%;
+  border: 1px solid var(--line); color: var(--muted); font-size: 12px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.help-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.tour-overlay {
+  position: fixed; inset: 0; background: rgba(6, 8, 12, .84);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 9000; padding: 24px; backdrop-filter: blur(3px);
+}
+.tour-card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 12px; padding: 26px 28px; max-width: 500px; width: 100%;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .55);
+}
+.tour-step {
+  font: 10px var(--mono); color: var(--accent);
+  letter-spacing: .12em; margin-bottom: 10px;
+}
+.tour-card h3 { font-size: 17px; font-weight: 500; margin: 0 0 10px; }
+.tour-card p { font-size: 13px; color: var(--muted); line-height: 1.8; margin: 0 0 20px; }
+.tour-actions { display: flex; gap: 8px; align-items: center; }
+.tour-dots { display: flex; gap: 5px; justify-content: center; margin-top: 18px; }
+.tour-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--line); }
+.tour-dots i.on { background: var(--accent); width: 14px; border-radius: 3px; }
+.shortcut-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.shortcut-table td { padding: 8px 0; border-bottom: 1px solid var(--line-2); }
+.shortcut-table tr:last-child td { border-bottom: none; }
+.shortcut-table td:last-child { color: var(--muted); text-align: right; }
+kbd {
+  display: inline-block; padding: 1px 6px; border-radius: 4px;
+  border: 1px solid var(--line); background: var(--panel-2);
+  font: 11px var(--mono); color: var(--text);
+}
+.empty-guide { padding: 28px 20px; text-align: center; }
+.eg-title { font-size: 13px; color: var(--muted); margin-bottom: 16px; }
+.eg-steps {
+  text-align: left; font-size: 12px; color: var(--dim);
+  line-height: 2.1; margin: 0 auto 18px; max-width: 340px;
+}
+.eg-steps b {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 17px; height: 17px; border-radius: 50%; margin-right: 8px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  font: 10px var(--mono); color: var(--accent);
+}
+
 /* ---------------------------------------------------------------- 质量评分 */
 .score-box { display: flex; gap: 20px; align-items: center; }
 .score-gauge { width: 118px; height: 118px; flex: 0 0 118px; }

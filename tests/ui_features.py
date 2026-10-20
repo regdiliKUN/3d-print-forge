@@ -52,9 +52,35 @@ def main() -> int:
 
         page.goto(URL, wait_until="networkidle")
         page.wait_for_selector(".step", timeout=10000)
+
+        # ---- 首次引导
+        page.wait_for_timeout(900)
+        if page.locator("#tour-skip").count():
+            check("首次引导自动弹出", True)
+            page.screenshot(path=str(SHOTS / "0_tour.png"))
+            page.locator("#tour-skip").click()
+            page.wait_for_timeout(300)
+            check("引导可跳过", page.locator("#tour-overlay").count() == 0)
+        else:
+            # 有项目时不弹引导是设计意图——已经用过的人不该再被打扰
+            n = page.locator(".project-row").count()
+            check("有项目时不弹引导", n > 0, f"项目 {n} 个")
+
+        # ---- 帮助面板（? 键）
+        page.keyboard.press("?")
+        page.wait_for_timeout(400)
+        check("帮助面板打开", page.locator("#help-overlay").count() > 0)
+        if page.locator("#help-overlay").count():
+            page.screenshot(path=str(SHOTS / "0_help.png"))
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
+            check("Esc 关闭帮助", page.locator("#help-overlay").count() == 0)
+        page.evaluate("() => document.querySelector('#tour-overlay')?.remove()")
         page.set_input_files("#file-input", str(sample()))
         page.wait_for_selector(".report-item", timeout=90000)
         time.sleep(2)
+
+        page.evaluate("() => document.querySelector('#tour-overlay')?.remove()")
 
         # ---- 三角面质量分布
         page.locator("#btn-tri-hist").click()

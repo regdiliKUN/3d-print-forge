@@ -29,6 +29,99 @@ const S = {
   borePoints: [],
 };
 
+const TOUR_STEPS = [
+  { title: "欢迎使用 3D Print Forge",
+    body: "从导入 STL 到产出可打印成品的完整流程，六步走完。原文件永远不会被改动，每一步都能回退。" },
+  { title: "① 导入",
+    body: "把 STL 拖进窗口，或者点「加载示例模型」——那是个故意带破洞、薄壁、碎屑的模型，可以立刻体验完整流程。" },
+  { title: "② 检测与修复",
+    body: "七项检查会告诉你哪里有问题，每项都带一键修复。右上角有 0–100 的质量评分，先看总分再看细节。" },
+  { title: "③ 处理",
+    body: "减面、镂空打孔、加支撑、自动摆正。左上的「快速预设」有手办 / FDM / 快速验证三套常用组合。" },
+  { title: "④ 可视化诊断",
+    body: "3D 预览上方一排按钮：壁厚热力、悬垂热力、剖切、切片层、部件分色、法线、支撑密度。鼠标悬停有说明。" },
+  { title: "⑤ 导出",
+    body: "STL / 3MF / OBJ / PLY 四种格式，还能导出参数配置和自包含 HTML 报告。有问题随时按 ? 看快捷键。" },
+];
+
+function tourSeen() {
+  try { return localStorage.getItem("tpf_tour_done") === "1"; } catch { return true; }
+}
+
+function showTour(force) {
+  if (!force && tourSeen()) return;
+  // 已经有引导层就不再叠一层（上传/切步骤会重渲染，容易被重复触发）
+  if ($("#tour-overlay")) return;
+  let i = 0;
+  const ov = document.createElement("div");
+  ov.id = "tour-overlay";
+  ov.className = "tour-overlay";
+  const render = () => {
+    const st = TOUR_STEPS[i];
+    ov.innerHTML = `<div class="tour-card">
+      <div class="tour-step">${i + 1} / ${TOUR_STEPS.length}</div>
+      <h3>${st.title}</h3>
+      <p>${st.body}</p>
+      <div class="tour-actions">
+        <button class="ghost" id="tour-skip">跳过</button>
+        <span class="spacer"></span>
+        ${i > 0 ? '<button class="ghost" id="tour-prev">上一步</button>' : ""}
+        <button class="primary" id="tour-next">${i === TOUR_STEPS.length - 1 ? "开始使用" : "下一步"}</button>
+      </div>
+      <div class="tour-dots">${TOUR_STEPS.map((_, k) => `<i class="${k === i ? "on" : ""}"></i>`).join("")}</div>
+    </div>`;
+    $("#tour-skip").onclick = close;
+    $("#tour-next").onclick = () => {
+      if (i === TOUR_STEPS.length - 1) return close();
+      i++; render();
+    };
+    if ($("#tour-prev")) $("#tour-prev").onclick = () => { i--; render(); };
+  };
+  const close = () => {
+    try { localStorage.setItem("tpf_tour_done", "1"); } catch {}
+    ov.remove();
+  };
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  document.body.appendChild(ov);
+  render();
+}
+
+const SHORTCUTS = [
+  ["Ctrl + Z", "撤销一步"],
+  ["Ctrl + Y / Ctrl + Shift + Z", "重做"],
+  ["?", "打开这个帮助面板"],
+  ["Esc", "关闭弹层 / 退出点选模式"],
+  ["拖拽左键", "旋转视角"],
+  ["滚轮", "缩放"],
+];
+
+function showShortcuts() {
+  const old = $("#help-overlay");
+  if (old) { old.remove(); return; }
+  const ov = document.createElement("div");
+  ov.id = "help-overlay";
+  ov.className = "tour-overlay";
+  ov.innerHTML = `<div class="tour-card">
+    <div class="tour-step">帮助</div>
+    <h3>快捷键与操作</h3>
+    <table class="shortcut-table">
+      ${SHORTCUTS.map(([k, v]) => `<tr><td><kbd>${k}</kbd></td><td>${v}</td></tr>`).join("")}
+    </table>
+    <p class="dim" style="font-size:11.5px;margin-top:14px">
+      每个步骤页顶部的说明会随步骤变化；参数下方的灰字就是该参数的取值建议。
+    </p>
+    <div class="tour-actions">
+      <button class="ghost" id="help-tour">重新看引导</button>
+      <span class="spacer"></span>
+      <button class="primary" id="help-close">知道了</button>
+    </div>
+  </div>`;
+  ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
+  document.body.appendChild(ov);
+  $("#help-close").onclick = () => ov.remove();
+  $("#help-tour").onclick = () => { ov.remove(); showTour(true); };
+}
+
 const PRESETS = {
   figure: {
     label: "手办（光固化）",
@@ -198,7 +291,17 @@ function renderImport(stage) {
           <button class="ghost ${S.favOnly ? "on" : ""}" id="btn-fav-only">只看收藏</button>
           <span class="dim" style="font-size:11px">${list.length}/${S.projects.length}</span>
         </div>
-        <div class="project-list">${rows || '<div class="queue-empty">没有匹配的模型</div>'}</div>
+        <div class="project-list">${rows || (S.projects.length === 0
+          ? `<div class="empty-guide">
+               <div class="eg-title">还没有模型</div>
+               <div class="eg-steps">
+                 <div><b>1</b> 把 STL 拖进这个窗口</div>
+                 <div><b>2</b> 或者点下面的「加载示例模型」，用带缺陷的样件走一遍流程</div>
+                 <div><b>3</b> 不确定从哪开始？点右上角的 <kbd>?</kbd> 看引导</div>
+               </div>
+               <button class="primary" id="btn-demo-empty">加载示例模型</button>
+             </div>`
+          : '<div class="queue-empty">没有匹配的模型</div>')}</div>
       </div>
     </div>
     <div class="block">
@@ -227,6 +330,7 @@ function renderImport(stage) {
           <button class="ghost" id="btn-pack">拼盘排版（${S.batchSel.size}）</button>
           <button class="ghost" id="btn-zip">打包下载（${S.batchSel.size}）</button>
           <button class="ghost" id="btn-batch-tag">批量打标签（${S.batchSel.size}）</button>
+          <button class="ghost" id="btn-demo">加载示例模型</button>
           <button class="ghost" id="btn-bundle">导出项目包</button>
           <button class="ghost" id="btn-bundle-import">导入项目包</button>
           <input type="file" id="bundle-file" accept=".zip" hidden>
@@ -1395,6 +1499,19 @@ function renderExport(stage) {
     mountViewer("view-orig", "original");
     mountViewer("view-now", "current");
   }
+  const loadDemo = async (e) => {
+    if (e && e.target) e.target.disabled = true;
+    try {
+      const d = await api("/api/demo", { method: "POST" });
+      $("#tour-overlay")?.remove();
+      await loadProjects();
+      await loadProject(d.id);
+      toast("示例模型已加载，可以直接点「开始检测」");
+    } catch (err) { toast("加载失败：" + err.message, "err"); }
+    finally { if (e && e.target) e.target.disabled = false; }
+  };
+  if ($("#btn-demo")) $("#btn-demo").onclick = loadDemo;
+  if ($("#btn-demo-empty")) $("#btn-demo-empty").onclick = loadDemo;
   $("#btn-split").onclick = runSplit;
   if ($("#btn-gap")) $("#btn-gap").onclick = async (e) => {
     try {
@@ -1729,9 +1846,16 @@ async function loadProject(pid) {
   S.advice = p.advice || null;
   S.step = S.analysis ? 1 : 1;
   renderSteps(); render();
+  bindHelp();
+  // 等项目列表加载完再判断：已经有模型说明不是第一次用，别打扰
+  setTimeout(() => {
+    if (!S.projects.length) showTour(false);
+  }, 700);
 }
 
 async function uploadFiles(files) {
+  // 用户开始导入就说明不需要引导了，先关掉免得挡住拖拽区
+  $("#tour-overlay")?.remove();
   if (!files.length) return;
   const fd = new FormData();
   for (const f of files) fd.append("files", f);
@@ -1818,6 +1942,11 @@ async function afterAnalyze(j) {
   S.analysis = p.analysis;
   await loadProjects();
   renderSteps(); render();
+  bindHelp();
+  // 等项目列表加载完再判断：已经有模型说明不是第一次用，别打扰
+  setTimeout(() => {
+    if (!S.projects.length) showTour(false);
+  }, 700);
   const s = S.analysis?.summary;
   if (s) toast(`检测完成：${s.counts.error} 项严重 / ${s.counts.warning} 项警告`, s.counts.error ? "warn" : "");
 }
@@ -2329,6 +2458,11 @@ async function afterBatch(j) {
   const fails = (rep.items || []).filter((x) => x.status === "failed");
   await loadProjects();
   renderSteps(); render();
+  bindHelp();
+  // 等项目列表加载完再判断：已经有模型说明不是第一次用，别打扰
+  setTimeout(() => {
+    if (!S.projects.length) showTour(false);
+  }, 700);
   const q = $("#queue");
   if (q && rep.items) {
     q.insertAdjacentHTML("afterbegin",
@@ -2413,6 +2547,11 @@ function bindDrop() {
   $("#btn-pick")?.addEventListener("click", () => $("#file-input").click());
 }
 
+function bindHelp() {
+  const btn = $("#btn-help");
+  if (btn) btn.onclick = showShortcuts;
+}
+
 async function boot() {
   await loadWorkflow();
   await loadProjects();
@@ -2429,6 +2568,12 @@ async function boot() {
   window.addEventListener("keydown", (e) => {
     const tag = (e.target.tagName || "").toLowerCase();
     if (tag === "input" || tag === "select" || tag === "textarea") return;
+    if (e.key === "?") { e.preventDefault(); showShortcuts(); return; }
+    if (e.key === "Escape") {
+      ["#tour-overlay", "#help-overlay"].forEach((sel) => $(sel)?.remove());
+      S.viewers.forEach((v) => v.disablePick && v.pickMode && v.disablePick());
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) {
       e.preventDefault();
       undoStep();
