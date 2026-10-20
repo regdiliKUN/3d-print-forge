@@ -195,7 +195,107 @@ const STEPS = [
   { id: "export", title: "导出", hint: "模型 / 配置 / 日志" },
 ];
 
+const TASKS = [
+  { key: "import", label: "导入模型", step: 0, test: (p) => !!p },
+  { key: "analyze", label: "运行检测", step: 1, test: (p) => !!(p && p.analysis) },
+  { key: "repair", label: "修复问题", step: 2, test: (p, h) => h.some((x) => /repair|fill_holes|fix_normals|remove_small|merge_vertices/.test(x.action || "")) },
+  { key: "process", label: "处理模型", step: 3, test: (p, h) => h.some((x) => (x.action || "") === "process") },
+  { key: "export", label: "导出成品", step: 5, test: (p, h) => h.some((x) => /process|split|boolean|merge/.test(x.action || "")) },
+];
+
+function renderInspector() {
+  const panel = $("#inspector");
+  if (!panel) return;
+  let el = panel;
+  // 只重写自己的容器，不能覆盖整个侧栏——里面还有任务队列
+  let host = $("#insp-tasks");
+  if (!host) {
+    el.innerHTML = `<div id="insp-tasks"></div>
+      <div class="insp-title">任务队列</div>
+      <div id="queue" class="queue-empty">暂无任务</div>`;
+    host = $("#insp-tasks");
+  }
+  el = host;
+  if (!S.pid) {
+    el.innerHTML = `<div class="insp-empty">
+      <div class="insp-empty-title">还没有选中模型</div>
+      <div class="insp-empty-body">在「导入模型」页拖入 STL，或点「加载示例模型」用带缺陷的样件试一遍。</div>
+    </div>`;
+    return;
+  }
+  const p = S.project || {};
+  const hist = p.history || [];
+  const done = TASKS.map((t) => t.test(p, hist));
+  const n = done.filter(Boolean).length;
+  el.innerHTML = `
+    <div class="insp-card">
+      <div class="insp-head"><span>流程进度</span><b>${n}/${TASKS.length}</b></div>
+      <div class="insp-bar"><i style="width:${(n / TASKS.length * 100).toFixed(0)}%"></i></div>
+      ${TASKS.map((t, i) => `<div class="insp-item ${done[i] ? "done" : ""}" data-task-step="${t.step}">
+        <span class="insp-check">${done[i] ? "✓" : i + 1}</span>
+        <span>${t.label}</span>
+      </div>`).join("")}
+      ${n < TASKS.length
+        ? `<button class="ghost" id="btn-autopilot" style="width:100%;margin-top:10px">一键走完剩余步骤</button>`
+        : `<div class="insp-finish">流程已走完，可以导出了</div>`}
+    </div>`;
+  $$("[data-task-step]", el).forEach((x) => x.onclick = () => goto(+x.dataset.taskStep));
+  const ap = $("#btn-autopilot");
+  if (ap) ap.onclick = autoPilot;
+}
+
+async function runAndWait(kind, payload) {
+  const r = await api(`/api/projects/${S.pid}/${kind}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
+  });
+  const deadline = Date.now() + 300000;
+  while (Date.now() < deadline) {
+    const j = await api(`/api/jobs/${r.id}`);
+    if (j.status === "done") return j;
+    if (j.status === "failed") throw new Error(j.error || "任务失败");
+    if (j.status === "cancelled") throw new Error("任务被中断");
+    await new Promise((res) => setTimeout(res, 400));
+  }
+  throw new Error("等待超时");
+}
+
+async function autoPilot() {
+  if (!S.pid) return toast("先导入模型", "warn");
+  const p = S.project || {};
+  const hist = p.history || [];
+  const todo = [];
+  if (!p.analysis) todo.push("analyze");
+  if (!TASKS[2].test(p, hist)) todo.push("repair");
+  if (!TASKS[3].test(p, hist)) todo.push("process");
+  if (!todo.length) return toast("该做的都做完了", "ok");
+
+  const btn = $("#btn-autopilot");
+  if (btn) { btn.disabled = true; btn.textContent = "执行中…"; }
+  const names = { analyze: "检测", repair: "修复", process: "处理" };
+  try {
+    for (const k of todo) {
+      if (btn) btn.textContent = `${names[k]}中…`;
+      const payload = k === "repair"
+        ? { actions: S.repairActions, small_ratio: 0.01, scale_factor: 1, thicken_mm: 0.5 }
+        : (k === "process" ? S.proc : {});
+      await runAndWait(k, payload);
+      S.project = await api(`/api/projects/${S.pid}`);
+      S.analysis = S.project.analysis || null;
+      renderInspector();
+    }
+    await loadProjects();
+    toast("已按顺序完成检测 → 修复 → 处理");
+    render();
+  } catch (e) {
+    toast("自动流程中断：" + e.message, "err");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "一键走完剩余步骤"; }
+  }
+}
+
 function renderSteps() {
+  renderInspector();
   const nav = $("#steps");
   nav.innerHTML = STEPS.map((s, i) => {
     const cls = i === S.step ? "active" : (i < S.step ? "done" : "");
@@ -1216,6 +1316,28 @@ function renderAdvice(stage) {
     </div>`;
 
   $("#btn-adv2").onclick = loadAdvice;
+}
+
+// 建议页的参数能映射到处理参数的只有这几项，其余（层高/曝光/温度）属于切片器设置
+const ADVICE_TO_PROC = {
+  hollow: (v) => ({ hollow: !!v }),
+  wall_thickness: (v) => ({ wall_thickness: Number(v) || 2.0 }),
+  supports: (v) => ({ supports: (v === "不需要" || v === "none" || v === false) ? "none" : "auto" }),
+};
+
+function applyAdvice(a) {
+  let n = 0;
+  const used = [];
+  for (const x of a.params || []) {
+    const fn = ADVICE_TO_PROC[x.key];
+    if (!fn) continue;
+    Object.assign(S.proc, fn(x.value));
+    used.push(x.label);
+    n++;
+  }
+  if (!n) return toast("这套建议里没有能直接映射到处理参数的项", "warn");
+  toast(`已应用 ${n} 项：${used.join("、")}`);
+  goto(3);
 }
 
 function layerCompare(a) {
@@ -2483,6 +2605,7 @@ async function refreshQueue() {
   let jobs = [];
   try { jobs = (await api("/api/jobs")).jobs; } catch { return; }
   const box = $("#queue");
+  if (!box) return;
   if (!jobs.length) { box.className = "queue-empty"; box.textContent = "暂无任务"; return; }
   box.className = "";
   box.innerHTML = jobs.slice(0, 12).map((j) => `

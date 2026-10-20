@@ -82,6 +82,14 @@ def main() -> int:
 
         page.evaluate("() => document.querySelector('#tour-overlay')?.remove()")
 
+        # ---- 侧栏任务清单
+        page.evaluate("() => document.querySelector('#tour-overlay')?.remove()")
+        has_insp = page.locator(".insp-card").count() > 0
+        check("侧栏任务清单已渲染", has_insp)
+        if has_insp:
+            txt = page.inner_text(".insp-head")
+            check("任务进度有计数", "/" in txt, txt)
+
         # ---- 三角面质量分布
         page.locator("#btn-tri-hist").click()
         page.wait_for_function(
