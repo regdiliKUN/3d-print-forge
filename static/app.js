@@ -1336,6 +1336,7 @@ function renderExport(stage) {
         <div class="row" style="margin-top:6px">
           <button class="ghost" id="btn-split">执行分件</button>
           <button class="ghost" id="btn-assembly">装配预览</button>
+          <button class="ghost" id="btn-gap">间隙检查</button>
           <span class="dim" style="font-size:11px">要求模型已水密</span>
         </div>
         <div id="split-result"></div>
@@ -1367,6 +1368,13 @@ function renderExport(stage) {
       </div>
     </div>` : ""}
     <div class="block">
+      <div class="block-head"><div class="block-title">参数变更对比</div>
+        <button class="ghost" id="btn-param-hist">展开</button></div>
+      <div class="block-body" id="param-hist-body">
+        <div class="queue-empty">看每一步改了哪些参数，以及改成什么</div>
+      </div>
+    </div>
+    <div class="block">
       <div class="block-head"><div class="block-title">操作历史</div>
         <div class="block-sub">${hist.length} 次 · 可回滚到任意一步</div></div>
       <div class="block-body">
@@ -1388,6 +1396,27 @@ function renderExport(stage) {
     mountViewer("view-now", "current");
   }
   $("#btn-split").onclick = runSplit;
+  if ($("#btn-gap")) $("#btn-gap").onclick = async (e) => {
+    try {
+      const d = await api(`/api/projects/${S.pid}/check-assembly`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tolerance_mm3: 0.5 }),
+      });
+      e.target.classList.toggle("on", !d.ok);
+      const box = $("#gap-result") || (() => {
+        const div = document.createElement("div");
+        div.id = "gap-result";
+        div.className = "field-help";
+        e.target.parentElement.after(div);
+        return div;
+      })();
+      box.innerHTML = d.ok
+        ? `✓ ${d.note}（容差 ${d.tolerance_mm3}mm³）`
+        : `<span style="color:var(--error)">✗ ${d.note}</span><br>`
+          + d.interferences.map((x) => `第 ${x.a} 块 ↔ 第 ${x.b} 块：重叠 ${x.volume_mm3}mm³`).join("<br>");
+      toast(d.ok ? "各块无干涉" : `发现 ${d.interferences.length} 处干涉`, d.ok ? "ok" : "err");
+    } catch (err) { toast("间隙检查失败：" + err.message, "err"); }
+  };
   if ($("#btn-assembly")) $("#btn-assembly").onclick = async (e) => {
     const v = S.viewers.find((x) => x.el.id === "view-orig") || S.viewers.find((x) => x.el.id === "viewer");
     if (!v) return toast("预览还没准备好", "warn");
@@ -1409,6 +1438,7 @@ function renderExport(stage) {
     } catch (err) { toast("装配预览失败：" + err.message, "err"); }
   };
   if ($("#btn-diff")) $("#btn-diff").onclick = loadDiff;
+  if ($("#btn-param-hist")) $("#btn-param-hist").onclick = loadParamHistory;
   if ($("#btn-undo")) $("#btn-undo").onclick = undoStep;
   if ($("#btn-redo")) $("#btn-redo").onclick = redoStep;
   if ($("#cut-pos")) $("#cut-pos").oninput = (e) => {
@@ -1842,6 +1872,41 @@ async function afterProcess(j) {
   toast("处理完成：" + (msgs.join("，") || "无变化"));
   S.step = 4; renderSteps(); render();
   loadAdvice();
+}
+
+const PARAM_LABELS = {
+  wall_thickness: "壳厚", hole_diameter: "孔径", drain_holes: "排液孔数",
+  overhang_deg: "悬垂角", support_diameter: "支撑顶径", support_spacing: "支撑间距",
+  decimate_ratio: "减面比例", scale: "缩放", target_height: "目标高",
+  max_size: "成型上限", axis: "切割轴", op: "布尔操作", degrees: "角度",
+  count: "数量", diameter: "直径", depth: "深度", lock: "锁定比例",
+};
+const paramLabel = (k) => PARAM_LABELS[k] || k;
+
+async function loadParamHistory() {
+  const box = $("#param-hist-body");
+  if (!box) return;
+  box.innerHTML = '<div class="queue-empty">读取中…</div>';
+  try {
+    const d = await api(`/api/projects/${S.pid}/param-history`);
+    const rows = (d.rows || []).filter((r) => r.changed && Object.keys(r.changed).length);
+    if (!rows.length) {
+      box.innerHTML = `<div class="queue-empty">还没有参数变更记录。${d.note || ""}</div>`;
+      return;
+    }
+    box.innerHTML = rows.slice().reverse().map((r) => `<div style="margin-bottom:10px">
+      <div class="dim" style="font-size:10.5px"><span class="mono">${r.at.slice(5, 16).replace("T", " ")}</span>
+        &nbsp;${r.action}${r.note ? " · " + r.note : ""}</div>
+      ${Object.entries(r.changed).map(([k, v]) => `<div class="metric-row" style="padding:3px 0">
+        <span style="font-size:11px">${paramLabel(k)}</span>
+        <b class="dim" style="font-size:10.5px;font-weight:400">
+          <span style="color:var(--muted)">${v.from}</span> → <span style="color:var(--accent)">${v.to}</span></b>
+      </div>`).join("")}
+    </div>`).join("");
+    $("#btn-param-hist").classList.add("on");
+  } catch (e) {
+    box.innerHTML = `<div class="queue-empty">读取失败：${e.message}</div>`;
+  }
 }
 
 async function loadDiff() {

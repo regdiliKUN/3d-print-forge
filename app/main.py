@@ -1302,6 +1302,94 @@ def report_html(pid: str) -> Response:
     )
 
 
+@app.get("/api/projects/{pid}/param-history")
+def project_param_history(pid: str) -> dict:
+    """历次操作的参数快照，并标出相对上一次改了哪几项。"""
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    hist = p.get("history") or []
+    rows = []
+    prev: dict = {}
+    for h in hist:
+        cur = h.get("params") or {}
+        changed = {}
+        for k, v in cur.items():
+            if k in prev and prev[k] != v:
+                changed[k] = {"from": prev[k], "to": v}
+        rows.append({
+            "at": h.get("at"),
+            "action": h.get("action"),
+            "params": cur,
+            "changed": changed,
+            "note": h.get("note"),
+        })
+        prev = {**prev, **cur}
+    return {"rows": rows, "count": len(rows),
+            "note": "只对比相邻两次都出现过的参数，新增参数不算「改变」"}
+
+
+@app.post("/api/projects/{pid}/check-assembly")
+def check_assembly(pid: str, payload: dict = Body(default={})) -> dict:
+    """检查分件各块摆回原位后是否互相干涉（重叠体积 > 0.5mm³ 即报警）。"""
+    import trimesh
+
+    from . import meshio
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    asm = p.get("assembly")
+    if not asm or not asm.get("files"):
+        raise HTTPException(404, "还没有分件结果")
+
+    tol = float(payload.get("tolerance_mm3", 0.5))
+    meshes = []
+    names = []
+    for f, off, name in zip(asm["files"], asm["offsets"], asm["names"]):
+        fp = Path(f)
+        if not fp.exists():
+            continue
+        m = meshio.load_mesh(fp)
+        cur = m.bounds.mean(axis=0)
+        m.apply_translation([float(off[0]) - float(cur[0]),
+                             float(off[1]) - float(cur[1]),
+                             float(off[2]) - float(cur[2])])
+        meshes.append(m)
+        names.append(name)
+    if len(meshes) < 2:
+        return {"ok": True, "interferences": [], "parts": len(meshes),
+                "note": "少于两块，无需检查"}
+
+    interferences = []
+    checked = 0
+    for i in range(len(meshes)):
+        for j in range(i + 1, len(meshes)):
+            checked += 1
+            vol = 0.0
+            try:
+                inter = trimesh.boolean.intersection([meshes[i], meshes[j]], engine="manifold")
+                if inter is not None and len(inter.faces) > 0:
+                    vol = abs(float(inter.volume))
+            except Exception:
+                vol = 0.0
+            if vol > tol:
+                interferences.append({
+                    "a": i + 1, "b": j + 1,
+                    "name_a": names[i], "name_b": names[j],
+                    "volume_mm3": round(vol, 1),
+                })
+    return {
+        "ok": not interferences,
+        "parts": len(meshes),
+        "pairs_checked": checked,
+        "interferences": interferences,
+        "tolerance_mm3": tol,
+        "note": (f"{checked} 对组合全部无干涉" if not interferences
+                 else f"{len(interferences)} 对存在干涉，装配时会顶住"),
+    }
+
+
 @app.get("/api/projects/{pid}/assembly")
 def project_assembly(pid: str) -> dict:
     """把分件各块按原始位置摆回去，合并成一个带顶点色的网格——装配预览用。"""

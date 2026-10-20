@@ -110,6 +110,8 @@ docker compose up --build      # → http://127.0.0.1:8000
 - **任意角度旋转**：除 90° 步进外，可输入任意角度（含负数）。
 - **批量打标签**：勾选多个项目一次追加标签。
 - **数据清理**：`python tools/cleanup.py` 列出无人引用的产出文件，`--apply` 才真删（默认干跑）。
+- **参数变更对比**：列出每一步改了哪些参数、从多少改到多少，只对比两次都出现过的键。
+- **分件间隙检查**：各块摆回原位后两两求交，重叠体积 > 0.5mm³ 就报干涉。
 
 ## 检测项与修复动作
 
@@ -328,6 +330,10 @@ TPF_OVERHANG_DEG=45        # 悬垂角阈值
 | 110 | 工程 | API `/api/v1` 别名 | 为后续兼容留出口 |
 | 111 | 工程 | 数据清理工具（默认干跑） | 259 个残留文件可清 |
 | 112 | 测试 | 新增 6 项 | 总数 205 → 211 |
+| 113 | 新功能 | 参数变更对比 | 看出每步改了哪几项 |
+| 114 | 新功能 | 分件间隙检查 | 人为偏移 20mm 能检出干涉 |
+| 115 | 工程 | 测试覆盖率统计 | 78%（advisor 95% / analysis 92%） |
+| 116 | 测试 | 新增 7 项 | 总数 211 → 218 |
 
 ## 故障排查
 
@@ -343,7 +349,7 @@ TPF_OVERHANG_DEG=45        # 悬垂角阈值
 ## 测试
 
 ```bash
-.venv/Scripts/python.exe -m pytest tests/ -q     # 211 项单元测试
+.venv/Scripts/python.exe -m pytest tests/ -q     # 218 项单元测试
 .venv/Scripts/python.exe tests/e2e.py            # 47 项端到端检查
 .venv/Scripts/python.exe tests/ui_smoke.py       # 浏览器冒烟 + 截图（需先启动服务）
 .venv/Scripts/python.exe tests/bench.py          # 性能基准
@@ -352,6 +358,9 @@ TPF_OVERHANG_DEG=45        # 悬垂角阈值
 端到端覆盖：缺陷模型 → 检测 → 修复 → 复检 → 处理 → 预览 → 建议 → 四类导出 → 批量 → 失败归因 → 暂停/恢复/中断 → 断点续跑 → 配置与模板。
 
 CI 在 GitHub Actions 上跑 3.11 / 3.12 双版本，包含单元测试、端到端和服务冒烟启动。
+
+覆盖率：`pytest tests/ --cov=app --cov-report=term-missing`，当前 78%（advisor 95%、analysis 92%、
+split 92%；batch 50% 和 pack 41% 偏低，主要是 run_job 依赖完整任务上下文，靠端到端覆盖）。
 
 ## 已知限制
 
