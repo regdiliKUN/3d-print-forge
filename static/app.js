@@ -1,3 +1,5 @@
+import { Viewer, b64ToTyped, round } from "./viewer.js";
+
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
@@ -18,7 +20,7 @@ const S = {
   proc: {
     decimate_ratio: 1.0, hollow: false, wall_thickness: 2.0, drain_holes: 2,
     hole_diameter: 3.0, supports: "none", overhang_deg: 45.0,
-    support_diameter: 1.0, support_spacing: 3.0, orient: true, scale: 1.0,
+    support_diameter: 1.0, support_spacing: 3.0, support_points: [], orient: true, scale: 1.0,
   },
   batchSel: new Set(),
 };
@@ -63,341 +65,7 @@ function fmtEta(s) {
   return `剩余 ${Math.floor(s / 60)} 分 ${Math.round(s % 60)} 秒`;
 }
 
-function b64ToTyped(b64, T) {
-  const bin = atob(b64);
-  const buf = new ArrayBuffer(bin.length);
-  const u8 = new Uint8Array(buf);
-  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-  return new T(buf);
-}
-
 /* ---------------------------------------------------------------- 3D 预览 */
-class Viewer {
-  constructor(el) {
-    this.el = el;
-    this.ok = false;
-    this.wire = false;
-    this._init();
-  }
-
-  async _init() {
-    try {
-      this.THREE = await import("https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js");
-    } catch {
-      this.el.innerHTML = '<div style="display:grid;place-items:center;height:100%;color:#5f6675;font-size:12px">3D 预览需要联网加载渲染库<br>其余功能不受影响</div>';
-      return;
-    }
-    const T = this.THREE;
-    const w = this.el.clientWidth || 600, h = this.el.clientHeight || 340;
-    this.renderer = new T.WebGLRenderer({ antialias: true, alpha: false });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-    this.renderer.setSize(w, h);
-    this.renderer.setClearColor(0x0a0c10);
-    this.el.appendChild(this.renderer.domElement);
-
-    this.scene = new T.Scene();
-    this.camera = new T.PerspectiveCamera(42, w / h, 0.1, 5000);
-    this.group = new T.Group();
-    this.group.rotation.x = -Math.PI / 2;
-    this.scene.add(this.group);
-
-    this.scene.add(new T.AmbientLight(0xffffff, 1.5));
-    const d1 = new T.DirectionalLight(0xffffff, 2.2); d1.position.set(1, 1.4, 1);
-    const d2 = new T.DirectionalLight(0x88aaff, 1.0); d2.position.set(-1, -0.8, -0.6);
-    this.scene.add(d1, d2);
-
-    this.mat = new T.MeshStandardMaterial({ color: 0xb9c6d8, metalness: 0.12, roughness: 0.62 });
-    this.mesh = null;
-
-    // 剖切：用局部裁剪平面沿模型 Z 轴（世界 Y）切开，看内部空腔
-    this.renderer.localClippingEnabled = true;
-    this.clipPlane = new T.Plane(new T.Vector3(0, -1, 0), 1e9);
-    this.mat.clippingPlanes = [this.clipPlane];
-    this.mat.clipShadows = false;
-    this.boxHelper = null;
-    this.markers = [];
-
-    this.theta = 0.9; this.phi = 1.15; this.radius = 3; this.target = new T.Vector3();
-    this._bind();
-    this._loop();
-    this.ok = true;
-    this.resize();
-  }
-
-  _bind() {
-    const c = this.renderer.domElement;
-    let drag = null;
-    c.addEventListener("pointerdown", (e) => {
-      drag = { x: e.clientX, y: e.clientY, btn: e.button };
-      c.setPointerCapture(e.pointerId);
-    });
-    c.addEventListener("pointermove", (e) => {
-      if (!drag) return;
-      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-      drag.x = e.clientX; drag.y = e.clientY;
-      if (drag.btn === 2) {
-        const s = this.radius * 0.0016;
-        this.target.x -= dx * s * Math.sin(this.theta);
-        this.target.z += dx * s * Math.cos(this.theta);
-        this.target.y += dy * s;
-      } else {
-        this.theta -= dx * 0.007;
-        this.phi = Math.max(0.08, Math.min(Math.PI - 0.08, this.phi - dy * 0.007));
-      }
-    });
-    c.addEventListener("pointerup", () => { drag = null; });
-    c.addEventListener("contextmenu", (e) => e.preventDefault());
-    c.addEventListener("wheel", (e) => {
-      e.preventDefault();
-      this.radius = Math.max(this.minR || 0.5, Math.min(this.maxR || 50, this.radius * (1 + Math.sign(e.deltaY) * 0.12)));
-    }, { passive: false });
-  }
-
-  setGeometry(vb64, ib64) {
-    if (!this.ok) return;
-    const T = this.THREE;
-    const verts = b64ToTyped(vb64, Float32Array);
-    const idx = b64ToTyped(ib64, Uint32Array);
-    const g = new T.BufferGeometry();
-    g.setAttribute("position", new T.BufferAttribute(verts, 3));
-    g.setIndex(new T.BufferAttribute(idx, 1));
-    g.computeVertexNormals();
-    g.computeBoundingSphere();
-    g.computeBoundingBox();
-    if (this.mesh) { this.group.remove(this.mesh); this.mesh.geometry.dispose(); }
-    this.mesh = new T.Mesh(g, this.mat);
-    this.mat.vertexColors = false;
-    this.mat.color.set(0xb9c6d8);
-    this.mat.needsUpdate = true;
-    if (this.wire) this.mat.wireframe = true;
-    this.group.add(this.mesh);
-    this.box = g.boundingBox.clone();
-    this.clipPlane.constant = this.box.max.y + 1;
-    this.clearBox();
-    const bs = g.boundingSphere;
-    this.target.set(0, 0, 0);
-    this.radius = bs.radius * 2.6;
-    this.minR = bs.radius * 0.9;
-    this.maxR = bs.radius * 12;
-    this.camera.near = bs.radius * 0.01;
-    this.camera.far = bs.radius * 40;
-    this.camera.updateProjectionMatrix();
-  }
-
-  setHeatmap(vals, kind) {
-    if (!this.ok || !this.mesh) return;
-    const T = this.THREE;
-    const n = vals.length;
-    const colors = new Float32Array(n * 3);
-    if (kind === "components") {
-      // 分类着色：相邻编号用对比色，部件边界一眼可辨
-      const pal = [
-        [0.36, 0.79, 0.65], [0.22, 0.54, 0.87], [0.94, 0.62, 0.15],
-        [0.89, 0.29, 0.29], [0.66, 0.33, 0.97], [0.45, 0.78, 0.36],
-        [0.9, 0.45, 0.7], [0.55, 0.62, 0.72],
-      ];
-      for (let i = 0; i < n; i++) {
-        const c = pal[Math.round(vals[i]) % pal.length];
-        colors[i * 3] = c[0]; colors[i * 3 + 1] = c[1]; colors[i * 3 + 2] = c[2];
-      }
-    } else {
-      // 壁厚：0–1.5mm 红到绿（1.5mm 以上一律安全色，薄区才醒目）
-      // 悬垂角：0–90° 红到绿
-      const hi = kind === "thickness" ? 1.5 : 90.0;
-      for (let i = 0; i < n; i++) {
-        let t = vals[i] / hi;
-        t = t < 0 ? 0 : t > 1 ? 1 : t;
-        let r, g2, b;
-        if (t < 0.5) { r = 1; g2 = t * 2; b = 0.12; }
-        else { r = (1 - t) * 2; g2 = 1; b = 0.12; }
-        colors[i * 3] = r; colors[i * 3 + 1] = g2; colors[i * 3 + 2] = b;
-      }
-    }
-    this.mesh.geometry.setAttribute("color", new T.BufferAttribute(colors, 3));
-    this.mat.vertexColors = true;
-    this.mat.color.set(0xffffff);
-    this.mat.needsUpdate = true;
-  }
-
-  clearHeatmap() {
-    if (!this.ok || !this.mesh) return;
-    this.mat.vertexColors = false;
-    this.mat.color.set(0xb9c6d8);
-    this.mat.needsUpdate = true;
-  }
-
-  setClip(t) {
-    if (!this.ok || !this.box) return;
-    const lo = this.box.min.y, hi = this.box.max.y;
-    this.clipPlane.constant = t >= 1 ? hi + 1 : lo + (hi - lo) * t;
-  }
-
-  toggleBox() {
-    if (!this.ok || !this.box) return false;
-    const T = this.THREE;
-    if (this.boxHelper) { this.clearBox(); return false; }
-    this.boxHelper = new T.Box3Helper(this.box, 0x3f8f78);
-    this.group.add(this.boxHelper);
-    return true;
-  }
-
-  clearBox() {
-    if (this.boxHelper) {
-      this.group.remove(this.boxHelper);
-      this.boxHelper.geometry?.dispose?.();
-      this.boxHelper = null;
-    }
-  }
-
-  markPoints(pts, color = 0xe24b4a) {
-    if (!this.ok) return;
-    const T = this.THREE;
-    this.clearMarkers();
-    const geo = new T.SphereGeometry(Math.max(0.4, (this.box ? this.box.getSize(new T.Vector3()).length() : 20) * 0.006), 8, 8);
-    const mat = new T.MeshBasicMaterial({ color });
-    for (const p of pts.slice(0, 400)) {
-      const s = new T.Mesh(geo, mat);
-      s.position.set(p[0], p[1], p[2]);
-      this.group.add(s);
-      this.markers.push(s);
-    }
-  }
-
-  clearMarkers() {
-    (this.markers || []).forEach((m) => this.group.remove(m));
-    this.markers = [];
-  }
-
-  drawSegments(segs) {
-    if (!this.ok) return 0;
-    const T = this.THREE;
-    this.clearSegments();
-    if (!segs || !segs.length) return 0;
-    const pts = [];
-    for (const s of segs) {
-      // [x, y, z0, z1] 模型坐标系，加到 group 跟着一起转
-      pts.push(s[0], s[1], s[2], s[0], s[1], s[3]);
-    }
-    const g = new T.BufferGeometry();
-    g.setAttribute("position", new T.Float32BufferAttribute(pts, 3));
-    const mat = new T.LineBasicMaterial({ color: 0xef9f27, transparent: true, opacity: 0.85 });
-    this.segs = new T.LineSegments(g, mat);
-    this.group.add(this.segs);
-    return segs.length;
-  }
-
-  clearSegments() {
-    if (this.segs) {
-      this.group.remove(this.segs);
-      this.segs.geometry?.dispose?.();
-      this.segs = null;
-    }
-  }
-
-  setGrid(on, w = 200, d = 200) {
-    if (!this.ok) return false;
-    const T = this.THREE;
-    this.clearGrid();
-    if (!on) return false;
-    const step = 10;
-    const pts = [];
-    const x0 = -w / 2, z0 = -d / 2;
-    for (let x = 0; x <= w; x += step) pts.push(x0 + x, 0, z0, x0 + x, 0, z0 + d);
-    for (let z = 0; z <= d; z += step) pts.push(x0, 0, z0 + z, x0 + w, 0, z0 + z);
-    const g = new T.BufferGeometry();
-    g.setAttribute("position", new T.Float32BufferAttribute(pts, 3));
-    const mat = new T.LineBasicMaterial({ color: 0x2a3644, transparent: true, opacity: 0.9 });
-    this.grid = new T.LineSegments(g, mat);
-    // 加到 scene：平台在世界水平面，不该跟着模型转
-    this.scene.add(this.grid);
-    return true;
-  }
-
-  drawNormals(maxCount = 600) {
-    if (!this.ok || !this.mesh) return 0;
-    const T = this.THREE;
-    this.clearNormals();
-    const g = this.mesh.geometry;
-    const pos = g.attributes.position?.array;
-    const nrm = g.attributes.normal?.array;
-    const idx = g.index?.array;
-    if (!pos || !nrm || !idx) return 0;
-    const tri = idx.length / 3;
-    const step = Math.max(1, Math.floor(tri / maxCount));
-    const size = this.box ? this.box.getSize(new T.Vector3()).length() : 30;
-    const len = size * 0.025;
-    const pts = [];
-    for (let t = 0; t < tri; t += step) {
-      const a = idx[t * 3], b = idx[t * 3 + 1], c = idx[t * 3 + 2];
-      const cx = (pos[a * 3] + pos[b * 3] + pos[c * 3]) / 3;
-      const cy = (pos[a * 3 + 1] + pos[b * 3 + 1] + pos[c * 3 + 1]) / 3;
-      const cz = (pos[a * 3 + 2] + pos[b * 3 + 2] + pos[c * 3 + 2]) / 3;
-      const nx = nrm[a * 3] + nrm[b * 3] + nrm[c * 3];
-      const ny = nrm[a * 3 + 1] + nrm[b * 3 + 1] + nrm[c * 3 + 1];
-      const nz = nrm[a * 3 + 2] + nrm[b * 3 + 2] + nrm[c * 3 + 2];
-      const ln = Math.hypot(nx, ny, nz) || 1;
-      pts.push(cx, cy, cz, cx + (nx / ln) * len, cy + (ny / ln) * len, cz + (nz / ln) * len);
-    }
-    const geo = new T.BufferGeometry();
-    geo.setAttribute("position", new T.Float32BufferAttribute(pts, 3));
-    this.normals = new T.LineSegments(geo, new T.LineBasicMaterial({ color: 0x378add }));
-    this.group.add(this.normals);
-    return pts.length / 6;
-  }
-
-  clearNormals() {
-    if (this.normals) {
-      this.group.remove(this.normals);
-      this.normals.geometry?.dispose?.();
-      this.normals = null;
-    }
-  }
-
-  clearGrid() {
-    if (this.grid) {
-      this.scene.remove(this.grid);
-      this.grid.geometry?.dispose?.();
-      this.grid = null;
-    }
-  }
-
-  toggleWire() {
-    this.wire = !this.wire;
-    this.mat.wireframe = this.wire;
-    return this.wire;
-  }
-
-  resize() {
-    if (!this.ok) return;
-    const w = this.el.clientWidth, h = this.el.clientHeight;
-    if (!w || !h) return;
-    this.renderer.setSize(w, h);
-    this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
-  }
-
-  _loop() {
-    const T = this.THREE;
-    const tick = () => {
-      requestAnimationFrame(tick);
-      const sp = Math.sin(this.phi), cp = Math.cos(this.phi);
-      this.camera.position.set(
-        this.target.x + this.radius * sp * Math.cos(this.theta),
-        this.target.y + this.radius * cp,
-        this.target.z + this.radius * sp * Math.sin(this.theta),
-      );
-      this.camera.lookAt(this.target);
-      this.renderer.render(this.scene, this.camera);
-    };
-    tick();
-  }
-
-  dispose() {
-    if (this.renderer) { this.renderer.dispose(); this.renderer.domElement.remove(); }
-    this.ok = false;
-  }
-}
-
 /* ---------------------------------------------------------------- 步骤 */
 const STEPS = [
   { id: "import", title: "导入模型", hint: "选择或拖入文件" },
@@ -555,6 +223,7 @@ function renderInspect(stage) {
           <button class="ghost" id="btn-grid">平台网格</button>
           <button class="ghost" id="btn-parts">部件分色</button>
           <button class="ghost" id="btn-normals">法线</button>
+          <button class="ghost" id="btn-measure">测量</button>
           <button class="ghost" id="btn-issues">标出问题</button>
           <button class="ghost" id="btn-sup">支撑预览</button>
           <button class="ghost" id="btn-heat-off">还原</button>
@@ -626,6 +295,30 @@ function renderInspect(stage) {
       $("#heat-legend").textContent = `显示 ${n} 条面法线。箭头朝内说明该处法线反了，切片软件会把实体当空腔。`;
     }
   };
+  $("#btn-measure").onclick = (e) => {
+    const v = S.viewers.find((x) => x.el.id === "viewer");
+    if (!v) return;
+    if (v.pickMode) { v.disablePick(); e.target.classList.remove("on"); return; }
+    S.measure = [];
+    e.target.classList.add("on");
+    v.enablePick((pt) => {
+      S.measure.push(pt);
+      v.markPoints(S.measure, 0x378add);
+      if (S.measure.length === 2) {
+        const [a, b] = S.measure;
+        const dx = Math.abs(a[0] - b[0]), dy = Math.abs(a[1] - b[1]), dz = Math.abs(a[2] - b[2]);
+        const d = Math.hypot(dx, dy, dz);
+        $("#heat-legend").textContent =
+          `距离 ${d.toFixed(2)} mm　（ΔX ${dx.toFixed(2)} · ΔY ${dy.toFixed(2)} · ΔZ ${dz.toFixed(2)}）`;
+        S.measure = [];
+        v.disablePick();
+        e.target.classList.remove("on");
+      } else {
+        $("#heat-legend").textContent = "已选第 1 点，再点第二点";
+      }
+    });
+    toast("点击模型上两点测距离");
+  };
   $("#btn-issues").onclick = loadIssues;
   $("#btn-sup").onclick = loadSupportPreview;
   $$("[data-fix]", stage).forEach((el) => el.onclick = () => {
@@ -653,13 +346,14 @@ function thicknessPanel(rep) {
       <div class="hist-track">
         <div class="hist-zone danger" style="width:${pct(0.4)}%"></div>
         <div class="hist-zone warn" style="left:${pct(0.4)}%;width:${Math.max(0, pct(0.8) - pct(0.4))}%"></div>
-        <div class="hist-mark thin" style="left:${pct(v.min)}%"><i></i><span>最薄 ${v.min}</span></div>
-        <div class="hist-mark" style="left:${pct(v.p5)}%"><i></i><span>P5 ${v.p5}</span></div>
-        <div class="hist-mark med" style="left:${pct(v.median)}%"><i></i><span>中位 ${v.median}</span></div>
+        <div class="hist-mark thin" style="left:${pct(v.min)}%"><i></i><span>${v.lower_bound ? "≥" : "最薄 "}${v.min}</span></div>
+        ${v.p5 != null ? `<div class="hist-mark" style="left:${pct(v.p5)}%"><i></i><span>P5 ${v.p5}</span></div>` : ""}
+        ${v.median != null ? `<div class="hist-mark med" style="left:${pct(v.median)}%"><i></i><span>中位 ${v.median}</span></div>` : ""}
       </div>
       <div class="hist-scale"><span>0</span><span>${max.toFixed(1)} mm</span></div>
-      <div class="field-help">采样 ${v.samples} 面 · 射线方向 ${v.directions || 1} 组 · ${mode}模式。
-        点「壁厚热力」可在 3D 里看分布。</div>
+      <div class="field-help">${v.lower_bound
+        ? `粗筛结论：所有采样点都厚于 ${v.min}mm，未做全量扫描。点「壁厚热力」可看完整分布。`
+        : `采样 ${v.samples} 面 · 射线方向 ${v.directions || 1} 组 · ${mode}模式。点「壁厚热力」可在 3D 里看分布。`}</div>
     </div>
   </div>`;
 }
@@ -795,8 +489,18 @@ function renderProcess(stage) {
           <select id="p-sup">
             <option value="none" ${p.supports === "none" ? "selected" : ""}>不加支撑</option>
             <option value="auto" ${p.supports === "auto" ? "selected" : ""}>自动生成</option>
+            <option value="manual" ${p.supports === "manual" ? "selected" : ""}>手动点选</option>
           </select>
-          <div class="field-help">按悬垂角找需要支撑的面，向下打射线找落脚点，生成柱状支撑。</div>
+          <div class="field-help">自动：按悬垂角找面、向下打射线找落脚点。手动：在模型上点哪里加哪里。</div>
+        </div>
+        <div class="field">
+          <div class="field-top"><span class="field-label">手动支撑点</span>
+            <span class="field-unit" id="pick-count">已选 ${(p.support_points || []).length} 个</span></div>
+          <div class="row">
+            <button class="ghost" id="btn-pick-mode">开启点选</button>
+            <button class="ghost" id="btn-pick-clear">清空</button>
+          </div>
+          <div class="field-help">点「开启点选」后直接点模型表面加点，绿色小球就是支撑落点。点完记得把支撑切到「手动点选」。</div>
         </div>
         <div class="field">
           <div class="field-top"><span class="field-label">悬垂角阈值</span><span class="field-unit">°</span></div>
@@ -850,6 +554,36 @@ function renderProcess(stage) {
   $("#p-hollow").onchange = (e) => { S.proc.hollow = e.target.checked; $("#row-hollow").classList.toggle("on", e.target.checked); };
   $("#p-orient").onchange = (e) => { S.proc.orient = e.target.checked; $("#row-orient").classList.toggle("on", e.target.checked); };
   $("#btn-proc").onclick = runProcess;
+  $("#btn-pick-mode").onclick = (e) => {
+    const v = S.viewers.find((x) => x.el.id === "proc-view");
+    if (!v) return toast("预览还没准备好", "warn");
+    if (v.pickMode) {
+      v.disablePick();
+      e.target.classList.remove("on");
+      e.target.textContent = "开启点选";
+      return;
+    }
+    v.enablePick((pt) => {
+      S.proc.support_points.push(pt);
+      S.proc.supports = "manual";
+      $("#p-sup").value = "manual";
+      v.markPoints(S.proc.support_points, 0x5dcaa5);
+      $("#pick-count").textContent = `已选 ${S.proc.support_points.length} 个`;
+    });
+    e.target.classList.add("on");
+    e.target.textContent = "点选中（点模型加点）";
+    toast("点击模型表面添加支撑点");
+  };
+  $("#btn-pick-clear").onclick = () => {
+    S.proc.support_points = [];
+    const v = S.viewers.find((x) => x.el.id === "proc-view");
+    if (v) v.clearMarkers();
+    $("#pick-count").textContent = "已选 0 个";
+  };
+  const pv = S.viewers.find((x) => x.el.id === "proc-view");
+  if (pv && (S.proc.support_points || []).length) {
+    setTimeout(() => pv.markPoints(S.proc.support_points, 0x5dcaa5), 1200);
+  }
   mountViewer("proc-view", "current");
 }
 
@@ -992,6 +726,7 @@ function renderExport(stage) {
         </div>`).join("")
         : '<div class="queue-empty">还没有操作记录</div>'}
         ${hist.length ? `<div class="row" style="margin-top:10px">
+          <button class="ghost" id="btn-undo">撤销一步（Ctrl+Z）</button>
           <button class="ghost" data-revert="-1">回到导入时</button></div>` : ""}
       </div>
     </div>`;
@@ -1002,6 +737,7 @@ function renderExport(stage) {
   }
   $("#btn-split").onclick = runSplit;
   if ($("#btn-diff")) $("#btn-diff").onclick = loadDiff;
+  if ($("#btn-undo")) $("#btn-undo").onclick = undoStep;
   $$("[data-revert]", stage).forEach((el) => el.onclick = () => doRevert(+el.dataset.revert));
   $$("[data-dl]", stage).forEach((el) => el.onclick = () => {
     const kind = el.dataset.dl;
@@ -1279,6 +1015,17 @@ async function loadDiff() {
   } catch (e) {
     box.innerHTML = `<div class="queue-empty">对比失败：${e.message}</div>`;
   }
+}
+
+function undoStep() {
+  const h = (S.project?.history) || [];
+  if (!h.length) { toast("没有可撤销的操作", "warn"); return; }
+  // 从后往前找第一条不是 revert 的记录——revert 本身也会进历史，
+  // 不跳过的话连续撤销会一直在 revert 记录之间来回弹
+  for (let i = h.length - 2; i >= 0; i--) {
+    if (h[i].action !== "revert") { doRevert(i); return; }
+  }
+  doRevert(-1);
 }
 
 async function doRevert(index) {
@@ -1568,6 +1315,14 @@ async function boot() {
   refreshQueue();
   setInterval(refreshQueue, 1500);
   window.addEventListener("resize", () => (S.viewers || []).forEach((v) => v.resize()));
+  window.addEventListener("keydown", (e) => {
+    const tag = (e.target.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "select" || tag === "textarea") return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) {
+      e.preventDefault();
+      undoStep();
+    }
+  });
 }
 
 boot();

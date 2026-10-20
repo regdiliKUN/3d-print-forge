@@ -183,6 +183,7 @@ def build_supports(
     max_count: int = 400,
     points: list | None = None,
     platform_z: float = 0.0,
+    avoid_model: bool = True,
 ) -> tuple[trimesh.Trimesh | None, dict]:
     v, f = np.asarray(mesh.vertices), np.asarray(mesh.faces)
     zmin = float(v[:, 2].min())
@@ -190,27 +191,42 @@ def build_supports(
     base_z = min(float(platform_z), zmin)
     if points:
         anchors = np.asarray([[p[0], p[1], p[2]] for p in points], dtype=np.float64)
+        anchor_normals = np.tile([0.0, 0.0, -1.0], (len(anchors), 1))
     else:
         n = analysis.face_normals(v, f)
         thr = -np.cos(np.radians(overhang_deg))
         idx = np.where(n[:, 2] < thr)[0]
         if len(idx) == 0:
             return None, {"count": 0, "note": "没有超过阈值角的悬垂面，无需支撑"}
-        centers = v[f[idx]].mean(axis=1)
-        key = np.floor(centers[:, :2] / max(0.2, spacing)).astype(np.int64)
-        _, uniq = np.unique(key, axis=0, return_index=True)
-        anchors = centers[uniq]
-        if len(anchors) > max_count:
-            sel = np.random.default_rng(5).choice(len(anchors), max_count, replace=False)
-            anchors = anchors[sel]
+        # 按面积均匀撒点，而不是「每个面取一个质心再去重」。
+        # 后者在低面数模型上会严重偏稀：一个 40×40 的底面如果只有 2 个三角形，
+        # 就只撒出 2 个支撑点，整个悬空区只撑两根柱。
+        tri_idx = idx
+        areas = analysis.tri_areas(v, f)[tri_idx]
+        total_area = float(areas.sum())
+        want = int(total_area / max(0.25, float(spacing) ** 2))
+        want = max(1, min(want, max_count))
+        rng = np.random.default_rng(5)
+        probs = areas / areas.sum() if total_area > 0 else None
+        pick = rng.choice(len(tri_idx), size=want, p=probs, replace=True)
+        picked_faces = tri_idx[pick]
+        tris = v[f[picked_faces]]
+        # 三角形内按重心坐标均匀取点
+        r1 = rng.random((want, 1))
+        r2 = rng.random((want, 1))
+        sq = np.sqrt(r1)
+        anchors = (1 - sq) * tris[:, 0] + sq * (1 - r2) * tris[:, 1] + sq * r2 * tris[:, 2]
+        anchor_normals = analysis.face_normals(v, f)[picked_faces]
+        # 只对自动识别的点过滤「贴平台」；手动点选是用户明确要的，不能悄悄丢掉
+        anchors = anchors[anchors[:, 2] > base_z + 0.5]
 
-    anchors = anchors[anchors[:, 2] > base_z + 0.5]
     if len(anchors) == 0:
         return None, {"count": 0, "note": "悬垂点都贴着平台，不需要支撑"}
 
     origins = anchors - np.array([0, 0, 1e-3])
     dirs = np.tile([0.0, 0.0, -1.0], (len(origins), 1))
     land_z = np.full(len(origins), base_z)
+    hit_model = np.zeros(len(origins), dtype=bool)
     try:
         locs, ray_idx, _ = mesh.ray.intersects_location(origins, dirs, multiple_hits=False)
         if len(ray_idx):
@@ -219,15 +235,41 @@ def build_supports(
                 z = float(locs[k][2])
                 if z > land_z[ri]:
                     land_z[ri] = z
+                    hit_model[ri] = True
     except Exception:
         pass
+
+    # 判断「悬垂点下方 10mm 内是不是实体」。
+    # 三个坑：trimesh 的 intersects_location 起点贴近表面时返回 0 命中；
+    # mesh.contains 在表面附近也不稳。所以直接用自己实现的 Möller–Trumbore，
+    # 它只看几何交点、不区分内外，正好适合这个判断。
+    solid_below = np.zeros(len(anchors), dtype=bool)
+    if avoid_model and len(anchors):
+        try:
+            # 沿面法线朝外挪 0.1mm 再往下打。
+            # 直接向下偏移会钻到实体内部，射线先打穿自己所在的面，
+            # 于是「悬空在空气中的球面」也被判成「下方有实体」。
+            probe = anchors + anchor_normals * 0.1
+            down = np.tile([0.0, 0.0, -1.0], (len(probe), 1))
+            dist = analysis._raycast_nearest(
+                np.asarray(mesh.vertices, dtype=np.float64),
+                np.asarray(mesh.faces),
+                probe, down, 1e-4, max_dist=3.0,
+            )
+            solid_below = np.isfinite(dist)
+        except Exception:
+            solid_below = hit_model & (np.asarray(anchors[:, 2] - land_z) < 10.0)
 
     parts = []
     heights = []
     segments = []
-    for (x, y, z), z0 in zip(anchors, land_z):
+    skipped_solid = 0
+    for i, ((x, y, z), z0) in enumerate(zip(anchors, land_z)):
         h = float(z) - float(z0)
         if h < 0.6:
+            continue
+        if solid_below[i]:
+            skipped_solid += 1
             continue
         # 顶部按设定直径，底部放大 1.8 倍：细高柱底部面积小，取件时一碰就倒
         sup_piece = _frustum(diameter / 2.0 * 1.8, diameter / 2.0, h)
@@ -246,6 +288,7 @@ def build_supports(
         "min_height": round(float(min(heights)), 2),
         "max_height": round(float(max(heights)), 2),
         "segments": segments,
+        "skipped_solid": skipped_solid,
     }
 
 
@@ -313,6 +356,7 @@ def apply_pipeline(mesh, p: dict, progress=None) -> tuple[trimesh.Trimesh, trime
         sup, sinfo = build_supports(
             mesh, float(p["overhang_deg"]), float(p["support_diameter"]),
             float(p["support_spacing"]), 400, pts,
+            avoid_model=(p["supports"] != "manual"),
         )
         report["supports"] = sinfo
 

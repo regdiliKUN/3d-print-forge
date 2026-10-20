@@ -150,7 +150,10 @@ def test_components_two_parts(tmp_path):
 def test_thickness_on_cube(clean_cube):
     m = meshio.load_mesh(clean_cube)
     r = analysis.check_thickness(m, {"sample_faces": 200})
-    assert r["value"]["median"] == pytest.approx(20.0, abs=1.0)
+    assert r["severity"] == "ok"
+    # 20mm 的实心件走粗筛快速通道：只回答「比告警线两倍厚」，不再给精确中位数
+    assert r["value"]["mode"] == "coarse"
+    assert r["value"]["min"] >= 1.6
 
 
 def test_thickness_thin_plate(tmp_path):
