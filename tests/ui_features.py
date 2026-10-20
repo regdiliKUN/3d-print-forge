@@ -148,6 +148,19 @@ def main() -> int:
         check("部件分色", "部件" in page.inner_text("#heat-legend"))
         page.screenshot(path=str(SHOTS / "9_parts.png"))
 
+        # ---- 支撑密度热力图
+        page.locator("#btn-supd").click()
+        page.wait_for_function(
+            "() => (document.querySelector('#heat-legend')?.textContent || '').includes('根')",
+            timeout=90000)
+        check("支撑密度热力图", "根" in page.inner_text("#heat-legend"),
+              page.inner_text("#heat-legend")[:50])
+
+        # ---- 坐标轴
+        page.locator("#btn-axes").click()
+        page.wait_for_timeout(500)
+        check("坐标轴开关", "on" in (page.locator("#btn-axes").get_attribute("class") or ""))
+
         # ---- 法线箭头
         page.locator("#btn-normals").click()
         page.wait_for_timeout(900)

@@ -409,6 +409,22 @@ class Viewer {
     }
   }
 
+  toggleAxes() {
+    if (!this.ok) return false;
+    const T = this.THREE;
+    if (this.axes) {
+      this.scene.remove(this.axes);
+      this.axes = null;
+      return false;
+    }
+    const size = this.box ? Math.max(this.box.getSize(new T.Vector3()).length() * 0.18, 5) : 20;
+    this.axes = new T.AxesHelper(size);
+    this.axes.material.depthTest = false;
+    this.axes.renderOrder = 8;
+    this.scene.add(this.axes);
+    return true;
+  }
+
   clearGrid() {
     if (this.grid) {
       this.scene.remove(this.grid);

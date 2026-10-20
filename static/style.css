@@ -353,6 +353,8 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
 .fav { cursor: pointer; font-size: 14px; color: var(--dim); flex: 0 0 auto; }
 .fav.on { color: var(--warn); }
 .pill.tag { background: #14251c; color: #7bc99a; }
+.pill.tag.clickable { cursor: pointer; }
+.pill.tag.clickable:hover { background: #1d3a2c; color: #a8e8c8; }
 .row-ops { display: flex; gap: 4px; opacity: 0; transition: opacity .15s; }
 .project-row:hover .row-ops { opacity: 1; }
 .row-ops button {

@@ -173,7 +173,7 @@ function renderImport(stage) {
     return `<div class="project-row ${p.id === S.pid ? "active" : ""}" data-pid="${p.id}">
       <span class="fav ${p.favorite ? "on" : ""}" data-fav="${p.id}" title="收藏">${p.favorite ? "★" : "☆"}</span>
       <span class="project-name">${p.name}</span>
-      ${(p.tags || []).map((t) => `<span class="pill tag">${t}</span>`).join("")}
+      ${(p.tags || []).map((t) => `<span class="pill tag clickable" data-tagfilter="${t}">${t}</span>`).join("")}
       ${sev ? `<span class="pill ${pill}">${SEV[sev] || sev}</span>` : '<span class="pill">未检测</span>'}
       <span class="project-meta">${p.volume_cm3 ? p.volume_cm3 + "cm³" : ""} ${p.history || 0} 次操作</span>
       <span class="row-ops">
@@ -254,6 +254,11 @@ function renderImport(stage) {
     search.onkeydown = (e) => { if (e.key === "Escape") { S.search = ""; render(); } };
   }
   if ($("#btn-fav-only")) $("#btn-fav-only").onclick = () => { S.favOnly = !S.favOnly; render(); };
+  $$("[data-tagfilter]", stage).forEach((el) => el.onclick = (e) => {
+    e.stopPropagation();
+    S.search = el.dataset.tagfilter;
+    render();
+  });
   $$("[data-fav]", stage).forEach((el) => el.onclick = async (e) => {
     e.stopPropagation();
     const id = el.dataset.fav;
@@ -349,6 +354,8 @@ function renderInspect(stage) {
           <button class="ghost" id="btn-dims">尺寸标注</button>
           <button class="ghost" id="btn-grid">平台网格</button>
           <button class="ghost" id="btn-parts">部件分色</button>
+          <button class="ghost" id="btn-supd">支撑密度</button>
+          <button class="ghost" id="btn-axes">坐标轴</button>
           <button class="ghost" id="btn-normals">法线</button>
           <button class="ghost" id="btn-measure">测量</button>
           <button class="ghost" id="btn-issues">标出问题</button>
@@ -449,6 +456,7 @@ function renderInspect(stage) {
     $("#btn-issues").classList.remove("on");
     $("#btn-sup").classList.remove("on");
     $("#btn-parts").classList.remove("on");
+    $("#btn-supd").classList.remove("on");
     $("#heat-scale").style.display = "none";
   };
   $("#btn-grid").onclick = (e) => {
@@ -471,6 +479,11 @@ function renderInspect(stage) {
     loadSection(z);
   };
   $("#btn-parts").onclick = () => loadHeat("components");
+  $("#btn-supd").onclick = () => loadHeat("support");
+  $("#btn-axes").onclick = (e) => {
+    const v = S.viewers.find((x) => x.el.id === "viewer");
+    if (v) e.target.classList.toggle("on", v.toggleAxes());
+  };
   $("#btn-normals").onclick = (e) => {
     const v = S.viewers.find((x) => x.el.id === "viewer");
     if (!v) return;
@@ -819,7 +832,10 @@ function renderProcess(stage) {
           <div class="row">
             <button class="ghost" id="btn-pick-mode">开启点选</button>
             <button class="ghost" id="btn-pick-clear">清空</button>
+            <button class="ghost" id="btn-sup-csv">导出 CSV</button>
+            <button class="ghost" id="btn-sup-import">导入 CSV</button>
           </div>
+          <input type="file" id="sup-csv-file" accept=".csv,.txt" hidden>
           <div class="field-help">点「开启点选」后直接点模型表面加点，绿色小球就是支撑落点。点完记得把支撑切到「手动点选」。</div>
         </div>
         <div class="field">
@@ -930,6 +946,40 @@ function renderProcess(stage) {
     e.target.classList.add("on");
     e.target.textContent = "点选中（点模型加点）";
     toast("点击模型表面添加支撑点");
+  };
+  $("#btn-sup-csv").onclick = () => {
+    const pts = S.proc.support_points || [];
+    if (!pts.length) return toast("还没有支撑点", "warn");
+    const csv = "x,y,z\n" + pts.map((q) => q.join(",")).join("\n");
+    const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "support_points.csv";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    toast(`已导出 ${pts.length} 个支撑点`);
+  };
+  $("#btn-sup-import").onclick = () => $("#sup-csv-file").click();
+  $("#sup-csv-file").onchange = async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    try {
+      const text = await f.text();
+      const lines = text.replace(/^\ufeff/, "").trim().split(/\r?\n/);
+      const body = /[a-zA-Z]/.test(lines[0]) ? lines.slice(1) : lines;
+      const pts = body.map((l) => l.split(/[,;\s]+/).map(Number))
+        .filter((q) => q.length >= 3 && q.slice(0, 3).every(Number.isFinite))
+        .map((q) => [round(q[0], 2), round(q[1], 2), round(q[2], 2)]);
+      if (!pts.length) return toast("CSV 里没解析出有效坐标", "warn");
+      S.proc.support_points.push(...pts);
+      S.proc.supports = "manual";
+      $("#p-sup").value = "manual";
+      $("#pick-count").textContent = `已选 ${S.proc.support_points.length} 个`;
+      const v = S.viewers.find((x) => x.el.id === "proc-view");
+      if (v) v.markPoints(S.proc.support_points, 0x5dcaa5);
+      toast(`导入 ${pts.length} 个支撑点`);
+    } catch (err) { toast("导入失败：" + err.message, "err"); }
   };
   $("#btn-pick-clear").onclick = () => {
     S.proc.support_points = [];
@@ -1053,6 +1103,18 @@ function renderExport(stage) {
         </div>
       </div>
     </div>` : ""}
+    <div class="block">
+      <div class="block-head"><div class="block-title">打印记录</div>
+        <div class="block-sub" id="print-stat">还没记录过</div></div>
+      <div class="block-body">
+        <div class="row">
+          <button class="ghost" data-print="success">打成功了</button>
+          <button class="ghost" data-print="fail">打失败了</button>
+          <input type="text" id="print-note" placeholder="备注（可选，例如「支撑倒了」）" style="flex:1;max-width:280px">
+        </div>
+        <div id="print-list"></div>
+      </div>
+    </div>
     <div class="block">
       <div class="block-head"><div class="block-title">布尔运算 / 合并</div>
         <div class="block-sub">两件之间做并集、差集、交集，或直接合并成一个网格</div></div>
@@ -1181,6 +1243,18 @@ function renderExport(stage) {
   if ($("#btn-diff")) $("#btn-diff").onclick = loadDiff;
   if ($("#btn-undo")) $("#btn-undo").onclick = undoStep;
   if ($("#btn-redo")) $("#btn-redo").onclick = redoStep;
+  $$("[data-print]", stage).forEach((el) => el.onclick = async () => {
+    try {
+      const r = await api(`/api/projects/${S.pid}/print-record`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ result: el.dataset.print, note: $("#print-note")?.value || "" }),
+      });
+      if ($("#print-note")) $("#print-note").value = "";
+      renderPrintList(r);
+      toast(`已记录：成功 ${r.success}/${r.total}（${r.rate}%）`);
+    } catch (e) { toast("记录失败：" + e.message, "err"); }
+  });
+  loadPrintRecords();
   $$("[data-bool]", stage).forEach((el) => el.onclick = async () => {
     const other = $("#bool-other")?.value;
     if (!other) return toast("先选另一个模型", "warn");
@@ -1690,7 +1764,10 @@ async function loadHeat(kind) {
     v.setHeatmap(vals, kind);
     const meta = m.meta || {};
     const el = $("#heat-legend");
-    if (el && kind === "components") {
+    if (el && kind === "support") {
+      window.__supportMax = meta.max || 10;
+      el.textContent = `${meta.note}。颜色按 ${meta.unit} 归一，越红越密——支撑过密会难拆且留疤，大片灰说明悬垂被漏了。`;
+    } else if (el && kind === "components") {
       const sizes = meta.sizes || [];
       el.textContent = `模型由 ${meta.components ?? "-"} 个互不连通的部件组成，同色即同一部件。`
         + (sizes.length > 1 ? ` 最大部件占 ${(sizes[0].area / sizes.reduce((a, x) => a + x.area, 0) * 100).toFixed(1)}% 表面积。` : "");
@@ -1703,6 +1780,7 @@ async function loadHeat(kind) {
     $("#btn-thick").classList.toggle("on", kind === "thickness");
     $("#btn-over").classList.toggle("on", kind === "overhang");
     $("#btn-parts").classList.toggle("on", kind === "components");
+    $("#btn-supd").classList.toggle("on", kind === "support");
   } catch (e) {
     toast("热力图生成失败：" + e.message, "err");
   }
@@ -1733,6 +1811,54 @@ async function runPack() {
   } catch (e) { toast("拼盘启动失败：" + e.message, "err"); }
 }
 
+async function loadPrintRecords() {
+  if (!$("#print-list")) return;
+  try {
+    renderPrintList(await api(`/api/projects/${S.pid}/print-record`));
+  } catch {}
+}
+
+function renderPrintList(d) {
+  const stat = $("#print-stat");
+  const list = $("#print-list");
+  if (!stat || !list) return;
+  const rows = d.prints || [];
+  stat.textContent = rows.length
+    ? `共 ${d.total} 次，成功 ${d.success} 次（${d.rate}%）`
+    : "还没记录过";
+  if (!rows.length) { list.innerHTML = ""; return; }
+  list.innerHTML = rows.slice().reverse().map((r) => `<div class="metric-row">
+    <span>${r.result === "success" ? '<span class="pill good">成功</span>' : '<span class="pill bad">失败</span>'}
+      <span class="mono dim" style="font-size:10px;margin-left:6px">${r.at.slice(5, 16).replace("T", " ")}</span></span>
+    <b class="dim" style="font-size:10.5px">${r.note || ""}</b>
+  </div>`).join("");
+}
+
+function packPlan(res) {
+  const pw = (res.platform || [192, 120])[0];
+  const pd = (res.platform || [192, 120])[1];
+  const placed = res.placed || [];
+  if (!placed.length) return "";
+  const W = 320, scale = W / Math.max(pw, pd);
+  const w = pw * scale, h = pd * scale;
+  const rects = placed.map((x, i) => {
+    const colors = ["#378add", "#5dcaa5", "#ef9f27", "#a855f7", "#e24b4a", "#97c459"];
+    const c = colors[i % colors.length];
+    return `<rect x="${(x.x * scale).toFixed(1)}" y="${(x.y * scale).toFixed(1)}"
+      width="${(x.w * scale).toFixed(1)}" height="${(x.d * scale).toFixed(1)}"
+      fill="${c}" fill-opacity="0.22" stroke="${c}" stroke-width="1" rx="2"/>
+      <text x="${(x.x * scale + x.w * scale / 2).toFixed(1)}"
+            y="${(x.y * scale + x.d * scale / 2 + 3).toFixed(1)}"
+            text-anchor="middle" fill="${c}" font-size="9">${i + 1}</text>`;
+  }).join("");
+  return `<div style="margin-top:12px">
+    <div class="dim" style="font-size:11px;margin-bottom:6px">平台俯视图 ${pw}×${pd}mm</div>
+    <svg viewBox="0 0 ${w} ${h}" style="width:${w}px;max-width:100%;background:#0a0c10;border:1px solid var(--line);border-radius:6px">
+      <g>${rects}</g>
+    </svg>
+  </div>`;
+}
+
 function afterPack(j) {
   const res = j.result || {};
   const box = $("#pack-result");
@@ -1748,6 +1874,7 @@ function afterPack(j) {
       <span>${i + 1}. ${x.name}</span>
       <b class="dim" style="font-size:10.5px">${x.w}×${x.d}mm → 位置 (${x.x}, ${x.y})</b>
     </div>`).join("")}
+    ${packPlan(res)}
     ${res.output ? `<div class="row" style="margin-top:10px">
       <button class="ghost" id="btn-pack-dl">下载拼盘 STL</button></div>` : ""}`;
   const dl = $("#btn-pack-dl");

@@ -258,6 +258,41 @@ def get_project(pid: str) -> dict:
     return p
 
 
+@app.post("/api/projects/{pid}/print-record")
+def add_print_record(pid: str, payload: dict = Body(default={})) -> dict:
+    """记一次实际打印结果。攒多了能看出这个模型/参数组合到底靠不靠谱。"""
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    result = str(payload.get("result") or "success").lower()
+    if result not in ("success", "fail"):
+        raise HTTPException(400, "result 只能是 success 或 fail")
+    rec = {
+        "at": datetime.now().isoformat(timespec="seconds"),
+        "result": result,
+        "note": str(payload.get("note") or "")[:200],
+        "faces": ((p.get("analysis") or {}).get("stats") or {}).get("faces"),
+    }
+    hist = list(p.get("prints") or [])
+    hist.append(rec)
+    hist = hist[-30:]
+    store.update(pid, prints=hist)
+    ok = sum(1 for x in hist if x["result"] == "success")
+    return {"ok": True, "prints": hist, "success": ok, "total": len(hist),
+            "rate": round(ok / len(hist) * 100, 1)}
+
+
+@app.get("/api/projects/{pid}/print-record")
+def get_print_records(pid: str) -> dict:
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    hist = list(p.get("prints") or [])
+    ok = sum(1 for x in hist if x["result"] == "success")
+    return {"prints": hist, "success": ok, "total": len(hist),
+            "rate": round(ok / len(hist) * 100, 1) if hist else 0.0}
+
+
 @app.post("/api/projects/{pid}/duplicate")
 def duplicate_project(pid: str) -> dict:
     """克隆一个项目：同一个源文件，独立的处理历史。"""
@@ -335,10 +370,41 @@ def project_mesh(
     }
 
 
+def _support_density_field(mesh, radius: float = 6.0) -> dict:
+    """支撑密度场：每个顶点周围 6mm 内有几根支撑。
+
+    太密说明支撑难拆、表面疤痕多；大片 0 说明那块悬垂被漏了。
+    """
+    import numpy as np
+    from scipy.spatial import cKDTree
+
+    from . import process
+
+    _, info = process.build_supports(mesh, 45.0, 1.0, 3.0, 400)
+    segs = info.get("segments") or []
+    v = np.asarray(mesh.vertices, dtype=np.float64)
+    if not segs or len(v) == 0:
+        return {"values": [0.0] * len(v), "max": 0, "unit": "根", "count": 0,
+                "direction": "higher_is_denser", "note": "没有生成支撑"}
+    pts = np.asarray([[x[0], x[1]] for x in segs], dtype=np.float64)
+    tree = cKDTree(pts)
+    counts = np.array([len(tree.query_ball_point(vv[:2], radius)) for vv in v], dtype=np.float64)
+    mx = float(counts.max()) if counts.size else 0.0
+    return {
+        "values": [round(float(x), 2) for x in counts],
+        "max": round(mx, 1),
+        "unit": f"根/{radius:.0f}mm",
+        "count": len(segs),
+        "radius": radius,
+        "direction": "higher_is_denser",
+        "note": f"{len(segs)} 根支撑，单点最密 {mx:.0f} 根",
+    }
+
+
 @app.get("/api/projects/{pid}/heatmap")
 def project_heatmap(
     pid: str,
-    kind: str = Query("thickness", pattern="^(thickness|overhang|components)$"),
+    kind: str = Query("thickness", pattern="^(thickness|overhang|components|support)$"),
     max_faces: int = Query(0, ge=0, le=500000),
 ) -> dict:
     """逐顶点标量场，前端用顶点色渲染成热力图。"""
@@ -358,6 +424,8 @@ def project_heatmap(
         field = analysis.thickness_field(mesh)
     elif kind == "overhang":
         field = analysis.overhang_field(mesh)
+    elif kind == "support":
+        field = _support_density_field(mesh)
     else:
         field = analysis.component_field(mesh)
     v = np.ascontiguousarray(mesh.vertices, np.float32)
