@@ -664,7 +664,23 @@ def repair(pid: str, payload: dict = Body(...)) -> dict:
     if not p:
         raise HTTPException(404, "项目不存在")
     actions = payload.get("actions") or ["fill_holes", "fix_normals"]
-    params = {"actions": actions, "small_ratio": float(payload.get("small_ratio", 0.01))}
+    if not isinstance(actions, (list, tuple)) or not actions:
+        raise HTTPException(422, "actions 必须是非空数组")
+    actions = [str(a) for a in actions]
+    unknown = [a for a in actions if a not in repair_mod.ACTIONS]
+    if unknown:
+        raise HTTPException(422, f"未知修复动作: {', '.join(unknown)}")
+    # 动作参数必须原样透传：旧接口只转发 small_ratio，
+    # 前端改加厚量/重网格精度/补洞细分时后端其实一直用默认值。
+    params = {"actions": actions}
+    for key in (
+        "max_loop", "fill_levels", "fill_smooth", "small_ratio",
+        "remesh_pitch", "remesh_smooth", "thicken_mm", "thicken_smooth",
+        "scale_factor",
+    ):
+        if key in payload:
+            params[key] = payload[key]
+    params.setdefault("small_ratio", 0.01)
     return _spawn("repair", f"修复 {p['name']}", params, repair_mod.run_job, pid)
 
 

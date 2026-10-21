@@ -1,6 +1,42 @@
 {
   "generated_by": "bench/make_models.py",
   "models": {
+    "empty": {
+      "file": "empty.stl",
+      "ascii": false,
+      "purpose": "0 面空文件，验证不崩且不可打印",
+      "faces": 0,
+      "vertices": 0,
+      "volume_mm3": 0.0,
+      "area_mm2": 0.0,
+      "extents": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "watertight": false,
+      "intent_faces": 0,
+      "intent_vertices": 0,
+      "bytes": 84
+    },
+    "needle": {
+      "file": "needle.stl",
+      "ascii": false,
+      "purpose": "0.2x0.2x200mm 细长针，长宽比 1000:1，专治按包围盒对角线取尺度的代码；壁厚须判 error",
+      "faces": 768,
+      "vertices": 386,
+      "volume_mm3": 8.0,
+      "area_mm2": 160.08,
+      "extents": [
+        0.2,
+        0.2,
+        200.0
+      ],
+      "watertight": true,
+      "intent_faces": 768,
+      "intent_vertices": 386,
+      "bytes": 38484
+    },
     "ball_20k": {
       "file": "ball_20k.stl",
       "ascii": false,
@@ -15,6 +51,8 @@
         60.0
       ],
       "watertight": true,
+      "intent_faces": 20480,
+      "intent_vertices": 10242,
       "bytes": 1024084
     },
     "ball_82k": {
@@ -31,6 +69,8 @@
         60.0
       ],
       "watertight": true,
+      "intent_faces": 81920,
+      "intent_vertices": 40962,
       "bytes": 4096084
     },
     "plate_thin": {
@@ -47,6 +87,8 @@
         0.35
       ],
       "watertight": true,
+      "intent_faces": 3072,
+      "intent_vertices": 1538,
       "bytes": 153684
     },
     "broken_1k": {
@@ -55,7 +97,7 @@
       "purpose": "破洞+整体反法线+碎屑，修复与检测的典型故障件",
       "faces": 1260,
       "vertices": 650,
-      "volume_mm3": 63476.523,
+      "volume_mm3": 63476.524,
       "area_mm2": 7677.996,
       "extents": [
         86.5,
@@ -63,6 +105,8 @@
         50.0
       ],
       "watertight": false,
+      "intent_faces": 1260,
+      "intent_vertices": 650,
       "bytes": 63084
     },
     "multi_5": {
@@ -79,6 +123,8 @@
         10.0
       ],
       "watertight": true,
+      "intent_faces": 240,
+      "intent_vertices": 130,
       "bytes": 12084
     },
     "xintersect": {
@@ -95,6 +141,8 @@
         40.0
       ],
       "watertight": true,
+      "intent_faces": 2560,
+      "intent_vertices": 1284,
       "bytes": 128084
     },
     "overhang_t": {
@@ -102,7 +150,7 @@
       "ascii": false,
       "purpose": "T 形伞件，顶板下表面必须生成支撑",
       "faces": 576,
-      "vertices": 294,
+      "vertices": 292,
       "volume_mm3": 9820.0,
       "area_mm2": 6552.0,
       "extents": [
@@ -111,6 +159,8 @@
         27.0
       ],
       "watertight": true,
+      "intent_faces": 576,
+      "intent_vertices": 294,
       "bytes": 28884
     },
     "inch_254": {
@@ -127,6 +177,8 @@
         100.0
       ],
       "watertight": true,
+      "intent_faces": 12,
+      "intent_vertices": 8,
       "bytes": 684
     },
     "statue_30k": {
@@ -143,13 +195,15 @@
         90.0
       ],
       "watertight": true,
+      "intent_faces": 20480,
+      "intent_vertices": 10242,
       "bytes": 1024084
     },
     "degenerate": {
       "file": "degenerate.stl",
       "ascii": false,
       "purpose": "含零面积面的退化件，验证不崩且判不可打印",
-      "faces": 3,
+      "faces": 2,
       "vertices": 4,
       "volume_mm3": 0.0,
       "area_mm2": 1.0,
@@ -159,6 +213,8 @@
         0.0
       ],
       "watertight": false,
+      "intent_faces": 3,
+      "intent_vertices": 4,
       "bytes": 234
     },
     "ascii_20k": {
@@ -175,6 +231,8 @@
         60.0
       ],
       "watertight": true,
+      "intent_faces": 20480,
+      "intent_vertices": 10242,
       "bytes": 5945299
     }
   }

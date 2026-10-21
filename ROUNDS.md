@@ -2,8 +2,8 @@
 
 > 对象：`I:\PrinterApp` 的网格检测 / 修补管线（`app/analysis.py`、`app/repair.py`、`app/voxelops.py`）。
 > 目标：1000 轮可验证迭代，优先修「补洞 / 非流形 / 自相交 / 法线 / 水密性 / 壁厚」。
-> 当前进度：**18 / 1000 轮**（本文件只记录已落地并有验证的轮次，不把计划算作完成）。
-> 当前基线：`pytest tests -q` → **80 passed**；`bench/round_gate.py` → **9/9**；`bench/probe_tritri.py` → **10/10**。
+> 当前进度：**19 / 1000 轮**（本文件只记录已落地并有验证的轮次，不把计划算作完成）。
+> 当前基线：`pytest tests -q` → **81 passed**；`bench/round_gate.py` → **9/9**；`bench/probe_tritri.py` → **10/10**。
 
 ---
 
@@ -20,7 +20,7 @@
 | 7 | MESH-007 | S2 | 内腔/碎屑按「负体积且在实体内」分类，修正量纲混用 | `analysis.py`、`repair.py` |
 | 8 | MESH-008 | S3 | 射线索引缓存同时校验 verts/faces 身份，避免旧索引导致漏检 | `analysis.py` |
 | 9 | MESH-009 | S2 | 壁厚全量 0 命中时不再无条件判安全，回退粗筛实测值 | `analysis.py` |
-| 10 | TEST-001 | S3 | 建立修补回归入口，46 个用例覆盖几何量而不只是「不抛异常」 | `tests/test_repair.py` |
+| 10 | TEST-001 | S3 | 建立修补回归入口，47 个用例覆盖几何量而不只是「不抛异常」 | `tests/test_repair.py` |
 | 11 | MESH-010 | S2 | 耳切失败不再用凹多边形不安全的扇形兜底，并做面积校验 | `repair.py` |
 | 12 | MESH-011 | S1 | 体素 pitch 上下界收敛，微小模型不再被固定 0.2mm floor 切没 | `voxelops.py` |
 | 13 | MESH-012 | S2 | 自交重网格的 pitch 统一走安全收敛，非法输入不再直传 | `repair.py` |
@@ -29,6 +29,7 @@
 | 16 | MESH-015 | S2 | 单层网格片补洞验收为「零厚度壳」并回退 | `repair.py` |
 | 17 | MESH-016 | S2 | 缩放/迭代次数/碎屑比例等外部参数做合法区间校验 | `repair.py` |
 | 18 | TEST-002 | S3 | 新增 9 项快速几何闸门，作为每轮续跑的入口 | `bench/round_gate.py` |
+| 19 | API-001 | S2 | 修复接口按白名单透传动作参数，未知动作直接 422 | `main.py` |
 
 级别：S1 = 可导致崩溃/内存爆炸/数据破坏；S2 = 修复结果错误或谎报成功；S3 = 检测误报/漏报、测试与可观测性。
 
@@ -55,7 +56,7 @@
 - **现象**：旧验收允许非流形边 +2，理由是「补洞难免碰坏两条边」。结果是补完仍非流形却报成功；两条候选路径失败时也没有可读原因。
 - **改动**：新增 `_repair_health`、`_loop_summary`；`act_fill_holes` 改为零新增非流形边/重复面，平滑与平面两条路径都评分后择优；失败返回 `reverted`、`revert_reason`、`rejected_candidates`、`remaining_loops`。
 - **验证**：`test_fill_never_increases_nonmanifold`、`test_fill_rejects_when_all_holes_are_too_large`；所有补洞用例断言开放边、非流形边、重复面、体积。
-- **遗留**：验收尚未纳入「补丁自相交」计数，留待第 19 轮之后处理。
+- **遗留**：验收尚未纳入「补丁自相交」计数，留待第 20 轮之后处理。
 
 ### 第 4 轮 · MESH-004（S2）重复面与非流形漏检
 
@@ -103,7 +104,7 @@
 
 - **现象**：原有测试只有打印机预设，修补逻辑没有任何回归保护；很多修复只能靠一次性探针观察。
 - **改动**：新增 `tests/test_repair.py`，统一用开放边、非流形边、重复面、有向体积、水密性断言；本轮同时修正了两个测试夹具（单面洞体积、`edge_keys` 碰撞组合）。
-- **验证**：`tests/test_repair.py` 当前 **46 passed**（37 个测试函数，其中三角-三角用例参数化为 10 组）；全量 `tests` **80 passed**。
+- **验证**：`tests/test_repair.py` 当前 **47 passed**（38 个测试函数，其中三角-三角用例参数化为 10 组）；全量 `tests` **81 passed**。
 - **遗留**：尚未覆盖 `main.py` 的任务调度/接口层；后续补 API 级回归。
 
 ### 第 11 轮 · MESH-010（S2）凹多边形扇形兜底
@@ -157,10 +158,17 @@
 
 ### 第 18 轮 · TEST-002（S3）快速几何闸门
 
-- **现象**：`pytest` 覆盖全，但每轮开始时要先跑 80 项、再看多个探针，反馈链路过长；探针输出是自由文本，不能直接判定通过/失败。
+- **现象**：`pytest` 覆盖全，但每轮开始时要先跑 80+ 项、再看多个探针，反馈链路过长；探针输出是自由文本，不能直接判定通过/失败。
 - **改动**：新增 `bench/round_gate.py`，9 项确定性检查：平面洞体积、破碎球补洞、薄片删除、重复面去重、逐分量法线、自相交检出/误报、零厚度壳回退、pitch 收敛、凹多边形耳切。支持 `--json`，失败退出码 1。
 - **验证**：`.venv\Scripts\python.exe bench\round_gate.py` → **9/9 通过，约 0.5s**。
 - **遗留**：闸门尚未纳入 `thicken`、`remove_small`、API 任务层；后续按轮次补充。
+
+### 第 19 轮 · API-001（S2）修复动作参数被丢弃
+
+- **现象**：`POST /api/projects/{pid}/repair` 只把 `small_ratio` 放进任务参数，前端传的 `thicken_mm`、`thicken_smooth`、`remesh_pitch`、`remesh_smooth`、`fill_levels`、`fill_smooth`、`max_loop`、`scale_factor` 全部被静默丢弃，后端一直用默认值。用户改「加厚 0.8mm」实际仍加厚 0.5mm。未知动作也会创建一条只写日志、什么也不做的任务。
+- **改动**：`main.repair` 增加动作白名单校验（未知动作返回 422），按白名单透传 9 个动作参数，省略 `actions` 时保留默认的补洞 + 法线。
+- **验证**：`test_repair_endpoint_forwards_action_params`：monkeypatch `_spawn` 捕获参数，断言 `thicken_mm=0.8`、`thicken_smooth=4`、`remesh_pitch=0.1` 原样到达，白名单外字段不进入任务；未知动作 422。
+- **遗留**：接口层目前只做白名单，不做数值范围校验；具体数值仍由第 17 轮的 `repair.py` 内部收敛。后续可补 Pydantic schema，让 422 更早返回。
 
 ---
 
@@ -171,7 +179,7 @@ cd I:\PrinterApp
 
 # 全量回归
 .venv\Scripts\python.exe -m pytest tests -q
-# 80 passed
+# 81 passed
 
 # 快速几何闸门（每轮开始/结束各跑一次）
 .venv\Scripts\python.exe bench\round_gate.py
@@ -199,7 +207,7 @@ cd I:\PrinterApp
 
 ## 四、遗留问题与下一轮计划
 
-按优先级排序，下一轮从第 19 轮开始，每轮只做一个可证伪的改动：
+按优先级排序，下一轮从第 20 轮开始，每轮只做一个可证伪的改动：
 
 1. **MESH-017（S2）补丁自相交验收**：`act_fill_holes` 目前只查开放边/非流形/重复面/体积，不查补出来的面是否与周围面穿插。计划：只对新增面与邻域面做 `tri_tri_overlap`，失败则回退。
 2. **MESH-018（S2）多三角形孤立薄片**：`_sliver_face_indices` 只处理 3 边环。计划：按连通分量找「所有边都是开放边」的薄片组，整组删除。
@@ -207,10 +215,10 @@ cd I:\PrinterApp
 4. **MESH-020（S2）重网格后复检**：`act_resolve_self_intersection` 返回前重新计数自相交、非流形、水密性，未达标则标记 `degraded`。
 5. **MESH-021（S3）单位推断歧义**：最大尺寸 <1.0 时一律判米会误伤 0.5mm 微件。计划：增加「微件/米制」二义性提示，而不是直接给 ×1000 建议。
 6. **UI-001（S2）degraded 展示**：壁厚 `degraded`、补洞 `reverted`、pitch 被收敛都应在进度/结果面板显示原因，而不是只写日志。
-7. **API-001（S3）入参 schema**：在 `main.py` 层校验 `scale_factor`、`thicken_mm`、`remesh_pitch` 等，和修补层形成双保险。
+7. **API-002（S3）Pydantic 入参 schema**：第 19 轮已做动作白名单与参数透传；后续在 FastAPI 层为 `scale_factor`、`thicken_mm`、`remesh_pitch` 等加数值范围，非法值直接 422，和修补层形成双保险。
 8. **PERF-001（S3）`boundary_loops` 大模型性能**：当前 Python 字典走访，10 万开放边时耗时明显；计划用 numpy 向量化边表 + 邻接数组。
 
-> 1000 轮是长期目标。当前只完成 18 轮，剩余 982 轮必须继续按「先写失败用例 → 修复 → 跑 `pytest` + `round_gate` → 记录本轮」的流程推进；本文件不会预填未完成的轮次。
+> 1000 轮是长期目标。当前只完成 19 轮，剩余 981 轮必须继续按「先写失败用例 → 修复 → 跑 `pytest` + `round_gate` → 记录本轮」的流程推进；本文件不会预填未完成的轮次。
 
 ---
 

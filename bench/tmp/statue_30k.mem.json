@@ -1,1 +1,1 @@
-{"hollow": {"peak_mb": 293.91, "base_mb": 122.27, "samples": 262}, "cavity": {"peak_mb": 293.35, "base_mb": 122.41, "samples": 233}, "export_stl": {"peak_mb": 125.77, "base_mb": 122.44, "samples": 1}, "export_3mf": {"peak_mb": 124.1, "base_mb": 123.05, "samples": 24}}
+{"hollow": {"peak_mb": 286.22, "base_mb": 121.91, "samples": 238}, "cavity": {"peak_mb": 290.97, "base_mb": 121.71, "samples": 229}, "export_stl": {"peak_mb": 122.75, "base_mb": 121.79, "samples": 3}, "export_3mf": {"peak_mb": 122.8, "base_mb": 122.41, "samples": 25}}

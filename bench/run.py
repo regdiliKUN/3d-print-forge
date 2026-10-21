@@ -80,14 +80,22 @@ def main() -> int:
     # ---------------- 判过 / 不过 ----------------
     rows: list[dict] = []
     violations: list[str] = []
+    fallbacks: list[str] = []
     for model, data in report["models"].items():
         model_thr = thr_all.get(model, {})
         for sname, s in data["stages"].items():
+            # 阈值没为该 (模型,阶段) 专门定义时回落 default。
+            # 这个回落必须显式标出来：否则一个 576 面的小模型拿 2000ms 的默认线
+            # 去判，PASS 是假的——它只是在说"没给这条定标准"。
+            explicit = sname in model_thr
             th = model_thr.get(sname, thr_all["default"])
             ms = s.get("median_ms")
             peak = s.get("peak_delta_mb")
             ok_ms = ms is None or ms <= th["max_ms"]
             ok_mem = peak is None or peak <= th["max_peak_delta_mb"]
+            if not explicit:
+                fallbacks.append(f"{model}/{sname}（用了默认 {th['max_ms']}ms / "
+                                 f"{th['max_peak_delta_mb']}MB）")
             if s.get("error"):
                 violations.append(f"{model}/{sname}: 阶段执行失败 {s['error']}")
             if not ok_ms:
@@ -102,6 +110,7 @@ def main() -> int:
                 "end_delta_mb": s.get("end_delta_mb"),
                 "leak_mb": s.get("end_delta_mb", 0) or 0,
                 "faces": data.get("faces"),
+                "threshold_explicit": explicit,
                 "status": "FAIL" if (not ok_ms or not ok_mem or s.get("error")) else "PASS",
             })
 
@@ -129,17 +138,24 @@ def main() -> int:
                                          encoding="utf-8")
 
     print()
-    print(f"{'模型':<12}{'阶段':<18}{'面数':>8}{'中位耗时':>10}{'阈值':>8}{'峰值内存':>10}"
-          f"{'阈值':>7}{'残留':>8}  判定")
-    print("-" * 100)
+    print(f"{'模型':<12}{'阶段':<18}{'面数':>8}   中位耗时       峰值内存   残留  判定")
+    print("-" * 92)
     for r in rows:
-        mark = "❌" if r["status"] == "FAIL" else "·"
-        print(f"{r['model']:<12}{r['stage']:<18}{r['faces']:>8}{r['ms']:>9.0f}ms"
-              f"{r['max_ms']:>7}ms{r['peak_mb']:>8.0f}MB{r['max_peak_mb']:>6}MB"
-              f"{r['leak_mb']:>7.0f}MB  {mark}{r['status']}")
-    print("-" * 100)
+        mark = "❌" if r["status"] == "FAIL" else " "
+        flag = "限" if r["threshold_explicit"] else "默"
+        ms = f"{r['ms']:>7.0f}ms ({flag}{r['max_ms']})"
+        mb = f"{r['peak_mb']:>6.0f}MB ({flag}{r['max_peak_mb']})"
+        print(f"{r['model']:<12}{r['stage']:<18}{r['faces']:>8}   {ms:<16}{mb:<16}"
+              f"{r['leak_mb']:>4.0f}MB {mark}{r['status']}")
+    print("-" * 92)
     n_fail = sum(1 for r in rows if r["status"] == "FAIL")
-    print(f"墙钟 {report['wall_s']}s ｜ 阶段 {len(rows)} 个 ｜ 超阈值 {n_fail} 个 ｜ 结果指纹偏差 {len(regressions)} 个")
+    n_fb = sum(1 for r in rows if not r["threshold_explicit"])
+    print(f"墙钟 {report['wall_s']}s ｜ 阶段 {len(rows)} 个 ｜ 超阈值 {n_fail} 个 ｜ "
+          f"结果指纹偏差 {len(regressions)} 个 ｜ 阈值未定义 {n_fb} 个")
+    if fallbacks:
+        print("\n以下阶段没有专属阈值，用的是默认线，其 PASS 不代表该操作真的够快：")
+        for f in fallbacks:
+            print("  -", f)
     if violations:
         print("\n超阈值明细：")
         for v in violations:

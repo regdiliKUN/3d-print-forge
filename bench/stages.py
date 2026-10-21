@@ -202,6 +202,9 @@ NO_MESH = {"load", "preview_payload"}
 # 每个模型跑哪些阶段。不是每个阶段对每个模型都有意义——
 # 刻意只跑有代表性的组合，否则全矩阵会把单次基准时间拖到不可用的长度。
 MATRIX: dict[str, list[str]] = {
+    # 极端形态在最前：先证明不会崩，再谈快慢
+    "empty": ["analyze"],
+    "needle": ["analyze", "thick_field"],
     "ball_20k": ["load", "preview_payload", "analyze", "thick_field", "overhang_field",
                  "comp_field", "section_profile", "build_supports", "support_density",
                  "hollow", "cavity", "export_stl", "export_3mf", "export_obj", "export_ply"],

@@ -21,6 +21,12 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
+# 这个脚本既会被 `python bench/make_models.py` 直接跑，也会被别的模块 import。
+# 直接跑时 sys.path[0] 是 bench/ 本身，找不到项目根的 app 包，必须显式补上。
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 ROOT = Path(__file__).resolve().parent
 MODELS = ROOT / "models"
 MANIFEST = ROOT / "model_manifest.json"
@@ -124,7 +130,31 @@ def make_degenerate() -> trimesh.Trimesh:
     return trimesh.Trimesh(vertices=v, faces=f, process=False)
 
 
+def make_needle() -> trimesh.Trimesh:
+    """细长针：0.2 x 0.2 x 200mm，长宽比 1000:1。
+
+    专治「用包围盒对角线当尺度」的那类代码——这种件上，对角线被单轴主导，
+    按对角线算出来的射线长度会比实际壁厚大三个数量级，
+    包围盒裁剪与分段查询在这种尺度失真下还能不能对，必须实测。
+    顺带它本身 0.2mm 壁厚，壁厚检测必须判 error。
+    """
+    return _subdivide(_box([0.2, 0.2, 200.0], center=[0, 0, 100.0]), 3)
+
+
+def make_empty() -> trimesh.Trimesh:
+    """空模型：0 个三角面。
+
+    用户真的会导入空文件（导出失败的产物、被清空的文件）。
+    它不该让检测崩掉，也不该给出「可以打印」。
+    """
+    return trimesh.Trimesh(vertices=np.zeros((0, 3)), faces=np.zeros((0, 3), dtype=np.int64),
+                           process=False)
+
+
 GENERATORS = {
+    # 极端形态放在最前面：它们最容易被生成脚本漏掉，也最容易让几何代码崩
+    "empty": (make_empty, False),
+    "needle": (make_needle, False),
     "ball_20k": (make_ball_20k, False),
     "ball_82k": (make_ball_82k, False),
     "plate_thin": (make_plate_thin, False),
@@ -141,6 +171,8 @@ GENERATORS = {
 
 # 每个模型的用途标注，写进 manifest，避免以后有人看着面数以为是随便造的
 PURPOSE = {
+    "empty": "0 面空文件，验证不崩且不可打印",
+    "needle": "0.2x0.2x200mm 细长针，长宽比 1000:1，专治按包围盒对角线取尺度的代码；壁厚须判 error",
     "ball_20k": "常规干净件，主力基准（加载/检测/场/预览/导出/镂空）",
     "ball_82k": "高模压力件，观察算法随面数伸缩",
     "plate_thin": "0.35mm 薄板，壁厚检测必须判 error",
@@ -157,28 +189,43 @@ PURPOSE = {
 
 def build() -> dict:
     MODELS.mkdir(parents=True, exist_ok=True)
+    # 落盘前先记一份「生成器的意图」，落盘+回读后再记一份「基准真正会加载的几何」。
+    # 两者会不一致：STL 每个三角形存独立顶点，加载时要焊接；
+    # 退化面会在焊接时被剔除。清单必须以**回读后**的为准，
+    # 否则基准数据与模型清单之间就有一层说不清的对不上。
+    from app import meshio
+
     manifest: dict = {"generated_by": "bench/make_models.py", "models": {}}
     for name, (fn, ascii_) in GENERATORS.items():
         m = fn()
+        intent_faces, intent_verts = int(len(m.faces)), int(len(m.vertices))
         path = MODELS / f"{name}.stl"
         if ascii_:
             m.export(path, file_type="stl_ascii")
         else:
             m.export(path)
+
+        loaded = meshio.load_mesh(path)
+        has = len(loaded.faces) > 0
         rec = {
             "file": path.name,
             "ascii": ascii_,
             "purpose": PURPOSE[name],
-            "faces": int(len(m.faces)),
-            "vertices": int(len(m.vertices)),
-            "volume_mm3": round(float(abs(m.volume)), 3),
-            "area_mm2": round(float(m.area), 3),
-            "extents": [round(float(x), 4) for x in m.extents],
-            "watertight": bool(m.is_watertight),
+            # 基准实际吃到的几何（回读后）
+            "faces": int(len(loaded.faces)),
+            "vertices": int(len(loaded.vertices)),
+            "volume_mm3": round(float(abs(loaded.volume)), 3) if has else 0.0,
+            "area_mm2": round(float(loaded.area), 3) if has else 0.0,
+            "extents": [round(float(x), 4) for x in loaded.extents] if has else [0.0, 0.0, 0.0],
+            "watertight": bool(loaded.is_watertight),
+            # 生成器意图：用来解释「为什么清单里的数比造的时候少」
+            "intent_faces": intent_faces,
+            "intent_vertices": intent_verts,
             "bytes": int(path.stat().st_size),
         }
         manifest["models"][name] = rec
-        print(f"  {name:<12} {rec['faces']:>7} 面  {rec['bytes']/1048576:>7.2f} MB  {path.name}")
+        note = "" if rec["faces"] == intent_faces else f"（造时 {intent_faces}，回读少了 {intent_faces - rec['faces']}）"
+        print(f"  {name:<12} {rec['faces']:>7} 面  {rec['bytes']/1048576:>7.2f} MB  {path.name}{note}")
     MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return manifest
 

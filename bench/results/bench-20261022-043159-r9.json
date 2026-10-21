@@ -1,0 +1,147 @@
+{
+ "tag": "r9",
+ "when": "2026-10-22T04:31:53",
+ "python": "3.13.14",
+ "repeats": 3,
+ "models": {
+  "empty": {
+   "model": "empty",
+   "faces": 0,
+   "stages": {
+    "analyze": {
+     "ms": [
+      1.92,
+      1.07,
+      1.58
+     ],
+     "median_ms": 1.58,
+     "min_ms": 1.07,
+     "max_ms": 1.92,
+     "prep_ms": 12.27,
+     "base_mb": 119.54,
+     "end_delta_mb": 0.01,
+     "fingerprint": {
+      "quality": 93.0,
+      "grade": "A",
+      "items.watertight.sev": "ok",
+      "items.watertight.val.boundary_edges": 0.0,
+      "items.normals.sev": "ok",
+      "items.normals.val.signed_volume": 0.0,
+      "items.normals.val.degenerate_faces": 0.0,
+      "items.normals.val.components": 0.0,
+      "items.normals.val.inverted_components": 0.0,
+      "items.normals.val.winding_conflicts": 0.0,
+      "items.normals.val.winding_consistent": false,
+      "items.thickness.sev": "ok",
+      "items.thickness.val.samples": 0.0,
+      "items.thickness.val.min": 1.6,
+      "items.thickness.val.thin_ratio": 0.0,
+      "items.thickness.val.mode": "coarse",
+      "items.thickness.val.lower_bound": true,
+      "items.nonmanifold.sev": "ok",
+      "items.nonmanifold.val.count": 0.0,
+      "items.self_intersection.sev": "ok",
+      "items.self_intersection.val.count": 0.0,
+      "items.self_intersection.val.sampled": false,
+      "items.components.sev": "ok",
+      "items.components.val.components": 0.0,
+      "items.units.sev": "warning",
+      "items.units.val.unit": "unknown",
+      "items.units.val.max_dim": 0.0,
+      "items.units.val.scale": 1.0,
+      "items.units.val.message": "尺寸为零，无法推断"
+     },
+     "error": null,
+     "peak_mb": 119.61,
+     "peak_delta_mb": 0.07
+    }
+   }
+  },
+  "needle": {
+   "model": "needle",
+   "faces": 768,
+   "stages": {
+    "analyze": {
+     "ms": [
+      80.36,
+      79.57,
+      78.9
+     ],
+     "median_ms": 79.57,
+     "min_ms": 78.9,
+     "max_ms": 80.36,
+     "prep_ms": 13.34,
+     "base_mb": 121.8,
+     "end_delta_mb": 0.5,
+     "fingerprint": {
+      "quality": 80.0,
+      "grade": "B",
+      "items.watertight.sev": "ok",
+      "items.watertight.val.boundary_edges": 0.0,
+      "items.normals.sev": "ok",
+      "items.normals.val.signed_volume": 8.0,
+      "items.normals.val.degenerate_faces": 0.0,
+      "items.normals.val.components": 1.0,
+      "items.normals.val.inverted_components": 0.0,
+      "items.normals.val.winding_conflicts": 0.0,
+      "items.normals.val.winding_consistent": true,
+      "items.thickness.sev": "error",
+      "items.thickness.val.samples": 768.0,
+      "items.thickness.val.min": 0.024,
+      "items.thickness.val.median": 0.146,
+      "items.thickness.val.p5": 0.024,
+      "items.thickness.val.max": 0.268,
+      "items.thickness.val.thin_ratio": 1.0,
+      "items.thickness.val.fail_ratio": 1.0,
+      "items.thickness.val.directions": 3.0,
+      "items.thickness.val.mode": "full",
+      "items.nonmanifold.sev": "ok",
+      "items.nonmanifold.val.count": 0.0,
+      "items.self_intersection.sev": "ok",
+      "items.self_intersection.val.count": 0.0,
+      "items.self_intersection.val.duplicates": 0.0,
+      "items.self_intersection.val.coplanar_overlaps": 0.0,
+      "items.self_intersection.val.sampled": false,
+      "items.self_intersection.val.candidate_pairs": 85632.0,
+      "items.self_intersection.val.tested_pairs": 5328.0,
+      "items.self_intersection.val.tolerance": 0.0002,
+      "items.components.sev": "ok",
+      "items.components.val.components": 1.0,
+      "items.units.sev": "ok",
+      "items.units.val.unit": "mm",
+      "items.units.val.max_dim": 200.0,
+      "items.units.val.scale": 1.0,
+      "items.units.val.message": "最大尺寸 200.0mm，在绝大多数桌面机成型范围内，无需换算。"
+     },
+     "error": null,
+     "peak_mb": 142.26,
+     "peak_delta_mb": 20.46
+    },
+    "thick_field": {
+     "ms": [
+      19.7,
+      21.14,
+      19.99
+     ],
+     "median_ms": 19.99,
+     "min_ms": 19.7,
+     "max_ms": 21.14,
+     "prep_ms": 14.44,
+     "base_mb": 122.53,
+     "end_delta_mb": 0.02,
+     "fingerprint": {
+      "n": 386.0,
+      "min": 0.2,
+      "p5": 0.2,
+      "max": 200.0,
+      "mean": 50.9262
+     },
+     "error": null,
+     "peak_mb": 122.55,
+     "peak_delta_mb": 0.02
+    }
+   }
+  }
+ },
+ "wall_s": 6.5
+}

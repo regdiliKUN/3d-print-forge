@@ -8,6 +8,11 @@
     "机器": "阈值以 32 核 / 64GB 的开发机为准记录。换机器必须重新采集基线并重设阈值，否则数字不可比。"
   },
   "default": {"max_ms": 2000, "max_peak_delta_mb": 500},
+  "empty": {"analyze": {"max_ms": 100, "max_peak_delta_mb": 50}},
+  "needle": {
+    "analyze": {"max_ms": 400, "max_peak_delta_mb": 200},
+    "thick_field": {"max_ms": 1500, "max_peak_delta_mb": 300}
+  },
   "ball_20k": {
     "load": {"max_ms": 200, "max_peak_delta_mb": 120},
     "preview_payload": {"max_ms": 800, "max_peak_delta_mb": 250},

@@ -1,1 +1,1 @@
-{"analyze": {"peak_mb": 129.05, "base_mb": 121.31, "samples": 16}, "overhang_field": {"peak_mb": 121.64, "base_mb": 121.64, "samples": 1}, "build_supports": {"peak_mb": 122.86, "base_mb": 122.85, "samples": 29}, "support_density": {"peak_mb": 122.91, "base_mb": 122.91, "samples": 28}}
+{"analyze": {"peak_mb": 129.95, "base_mb": 120.8, "samples": 16}, "overhang_field": {"peak_mb": 120.93, "base_mb": 120.93, "samples": 1}, "build_supports": {"peak_mb": 122.2, "base_mb": 122.19, "samples": 27}, "support_density": {"peak_mb": 122.25, "base_mb": 122.25, "samples": 25}}

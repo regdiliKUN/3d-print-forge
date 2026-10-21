@@ -557,3 +557,39 @@ def test_fill_action_sanitizes_numeric_params():
     assert info["filled"] is True
     assert_watertight(out)
     assert float(out.volume) == pytest.approx(8000.0, abs=1e-6)
+
+
+# ---------------------------------------------------------------- API 参数透传
+def test_repair_endpoint_forwards_action_params(monkeypatch):
+    from fastapi import HTTPException
+
+    from app import main as main_mod
+
+    monkeypatch.setattr(main_mod.store, "get",
+                        lambda pid: {"id": pid, "name": "demo"})
+    captured: dict = {}
+
+    def fake_spawn(kind, title, params, worker, pid):
+        captured.update(kind=kind, params=params, pid=pid)
+        return {"ok": True}
+
+    monkeypatch.setattr(main_mod, "_spawn", fake_spawn)
+    res = main_mod.repair("p1", {
+        "actions": ["thicken"], "thicken_mm": 0.8, "thicken_smooth": 4,
+        "remesh_pitch": 0.1, "unknown_key": 123,
+    })
+    assert res == {"ok": True}
+    assert captured["kind"] == "repair"
+    assert captured["params"]["thicken_mm"] == 0.8
+    assert captured["params"]["thicken_smooth"] == 4
+    assert captured["params"]["remesh_pitch"] == 0.1
+    assert "unknown_key" not in captured["params"], "白名单外的参数不应进入任务"
+
+    # 未知动作必须 422，而不是创建一条什么也不做的任务
+    with pytest.raises(HTTPException) as exc:
+        main_mod.repair("p1", {"actions": ["no_such_action"]})
+    assert exc.value.status_code == 422
+
+    # 省略 actions 时保留默认补洞 + 法线
+    main_mod.repair("p1", {})
+    assert captured["params"]["actions"] == ["fill_holes", "fix_normals"]

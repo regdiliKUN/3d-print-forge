@@ -1008,6 +1008,19 @@ def quality_score(report: dict) -> dict:
     items = {i.get("id"): i for i in (report.get("items") or [])}
     parts: list[dict] = []
 
+    # 空模型闸门：一个 0 面的文件，七项检测项项都「没有问题」——
+    # 没有边可断、没有面可反、没有自交、没有碎屑——于是被算成 A 级「可以直接打印」，
+    # 打印一个根本不存在的件。这属于「给出错误的安全结论」，比直接报错危险得多，
+    # 所以必须在打分之前单独拦下来。
+    n_faces = int((report.get("stats") or {}).get("faces") or 0)
+    if n_faces == 0:
+        return {
+            "score": 0.0, "grade": "D", "verdict": "模型没有任何三角面，无法打印",
+            "parts": [{"name": "几何存在性", "score": 0.0, "max": 100,
+                       "note": "0 个三角面，其余各项无意义"}],
+            "max": 100, "empty": True,
+        }
+
     def add(name: str, got: float, full: int, note: str) -> None:
         parts.append({"name": name, "score": round(max(0.0, min(float(full), got)), 1),
                       "max": full, "note": note})
@@ -1184,7 +1197,7 @@ def run_job(ctx, params):
         "stats": stats,
         "items": final_items,
         "summary": summary,
-        "quality": quality_score({"items": final_items}),
+        "quality": quality_score({"items": final_items, "stats": stats}),
     }
     store.update(pid, analysis=report)
     ctx.tick(1.0, "检测完成", "done")
@@ -1212,5 +1225,5 @@ def analyze_mesh(mesh, path, params: dict | None = None) -> dict:
         "stats": stats,
         "items": items,
         "summary": summary,
-        "quality": quality_score({"items": items}),
+        "quality": quality_score({"items": items, "stats": stats}),
     }

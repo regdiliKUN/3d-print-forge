@@ -1,1 +1,1 @@
-{"analyze": {"peak_mb": 126.81, "base_mb": 122.32, "samples": 17}, "fill_holes": {"peak_mb": 452.88, "base_mb": 452.88, "samples": 105}, "fix_normals": {"peak_mb": 452.88, "base_mb": 452.88, "samples": 5}}
+{"analyze": {"peak_mb": 126.46, "base_mb": 120.68, "samples": 14}, "fill_holes": {"peak_mb": 452.35, "base_mb": 452.35, "samples": 406}, "fix_normals": {"peak_mb": 452.35, "base_mb": 452.35, "samples": 4}}
