@@ -1,0 +1,1045 @@
+{
+ "tag": "baseline",
+ "when": "2026-10-22T03:30:29",
+ "python": "3.13.14",
+ "repeats": 3,
+ "models": {
+  "ball_20k": {
+   "model": "ball_20k",
+   "faces": 20480,
+   "stages": {
+    "load": {
+     "ms": [
+      21.17,
+      21.36,
+      22.08
+     ],
+     "median_ms": 21.36,
+     "min_ms": 21.17,
+     "max_ms": 22.08,
+     "prep_ms": 0.0,
+     "base_mb": 119.56,
+     "end_delta_mb": 0.03,
+     "fingerprint": {
+      "vertices": 10242.0,
+      "faces": 20480.0
+     },
+     "error": null,
+     "peak_mb": 123.24,
+     "peak_delta_mb": 3.68
+    },
+    "preview_payload": {
+     "ms": [
+      42.9,
+      46.55,
+      39.09
+     ],
+     "median_ms": 42.9,
+     "min_ms": 39.09,
+     "max_ms": 46.55,
+     "prep_ms": 0.0,
+     "base_mb": 119.29,
+     "end_delta_mb": 2.29,
+     "fingerprint": {
+      "vertex_count": 10242.0,
+      "face_count": 20480.0,
+      "b64_chars": 491552.0,
+      "raw_bytes": 368664.0
+     },
+     "error": null,
+     "peak_mb": 122.29,
+     "peak_delta_mb": 3.0
+    },
+    "analyze": {
+     "ms": [
+      134.86,
+      141.57,
+      137.94
+     ],
+     "median_ms": 137.94,
+     "min_ms": 134.86,
+     "max_ms": 141.57,
+     "prep_ms": 38.63,
+     "base_mb": 122.47,
+     "end_delta_mb": 6.62,
+     "fingerprint": {
+      "quality": 100.0,
+      "grade": "A",
+      "items.watertight.sev": "ok",
+      "items.watertight.val.boundary_edges": 0.0,
+      "items.normals.sev": "ok",
+      "items.normals.val.signed_volume": 113036.0,
+      "items.normals.val.degenerate_faces": 0.0,
+      "items.normals.val.winding_consistent": true,
+      "items.thickness.sev": "ok",
+      "items.thickness.val.samples": 0.0,
+      "items.thickness.val.min": 1.6,
+      "items.thickness.val.thin_ratio": 0.0,
+      "items.thickness.val.mode": "coarse",
+      "items.thickness.val.lower_bound": true,
+      "items.nonmanifold.sev": "ok",
+      "items.nonmanifold.val.count": 0.0,
+      "items.self_intersection.sev": "ok",
+      "items.self_intersection.val.count": 0.0,
+      "items.self_intersection.val.sampled": false,
+      "items.self_intersection.val.candidate_pairs": 144.0,
+      "items.components.sev": "ok",
+      "items.components.val.components": 1.0,
+      "items.units.sev": "ok",
+      "items.units.val.unit": "mm",
+      "items.units.val.max_dim": 60.0,
+      "items.units.val.scale": 1.0,
+      "items.units.val.message": "最大尺寸 60.0mm，在绝大多数桌面机成型范围内，无需换算。"
+     },
+     "error": null,
+     "peak_mb": 142.0,
+     "peak_delta_mb": 19.53
+    },
+    "thick_field": {
+     "ms": [
+      4065.37,
+      3879.61,
+      4133.69
+     ],
+     "median_ms": 4065.37,
+     "min_ms": 3879.61,
+     "max_ms": 4133.69,
+     "prep_ms": 41.76,
+     "base_mb": 128.62,
+     "end_delta_mb": 1.64,
+     "fingerprint": {
+      "n": 10242.0,
+      "min": 59.983,
+      "p5": 59.983,
+      "max": 59.986,
+      "mean": 59.9853
+     },
+     "error": null,
+     "peak_mb": 136.22,
+     "peak_delta_mb": 7.6
+    },
+    "overhang_field": {
+     "ms": [
+      7.25,
+      7.3,
+      6.46
+     ],
+     "median_ms": 7.25,
+     "min_ms": 6.46,
+     "max_ms": 7.3,
+     "prep_ms": 43.86,
+     "base_mb": 129.51,
+     "end_delta_mb": 3.11,
+     "fingerprint": {
+      "n": 10242.0,
+      "min": 10.4,
+      "max": 180.0,
+      "mean": 89.8694
+     },
+     "error": null,
+     "peak_mb": 132.56,
+     "peak_delta_mb": 3.05
+    },
+    "comp_field": {
+     "ms": [
+      34.41,
+      31.89,
+      32.1
+     ],
+     "median_ms": 32.1,
+     "min_ms": 31.89,
+     "max_ms": 34.41,
+     "prep_ms": 46.28,
+     "base_mb": 129.39,
+     "end_delta_mb": 2.29,
+     "fingerprint": {
+      "components": 1.0,
+      "sizes[0]": 11306.4
+     },
+     "error": null,
+     "peak_mb": 133.86,
+     "peak_delta_mb": 4.47
+    },
+    "section_profile": {
+     "ms": [
+      106.14,
+      91.81,
+      100.68
+     ],
+     "median_ms": 100.68,
+     "min_ms": 91.81,
+     "max_ms": 106.14,
+     "prep_ms": 49.55,
+     "base_mb": 130.02,
+     "end_delta_mb": 0.9,
+     "fingerprint": {
+      "ok": true,
+      "samples": 40.0,
+      "zs.len": 40,
+      "areas.len": 40,
+      "perimeters.len": 40,
+      "max_area_mm2": 2824.6,
+      "volume_integral_mm3": 112864.0,
+      "perimeter_integral_mm2": 8841.8,
+      "correction": 1.002
+     },
+     "error": null,
+     "peak_mb": 136.13,
+     "peak_delta_mb": 6.11
+    },
+    "build_supports": {
+     "ms": [
+      139.0,
+      126.98,
+      117.08
+     ],
+     "median_ms": 126.98,
+     "min_ms": 117.08,
+     "max_ms": 139.0,
+     "prep_ms": 62.28,
+     "base_mb": 130.44,
+     "end_delta_mb": 4.35,
+     "fingerprint": {
+      "count": 119.0,
+      "segments": 119.0,
+      "faces": 4760.0,
+      "note": ""
+     },
+     "error": null,
+     "peak_mb": 137.55,
+     "peak_delta_mb": 7.11
+    },
+    "support_density": {
+     "ms": [
+      172.8,
+      156.62,
+      154.59
+     ],
+     "median_ms": 156.62,
+     "min_ms": 154.59,
+     "max_ms": 172.8,
+     "prep_ms": 52.04,
+     "base_mb": 130.38,
+     "end_delta_mb": 4.61,
+     "fingerprint": {
+      "count": 119.0,
+      "max": 16.0,
+      "n": 10242.0,
+      "mean": 2.93068,
+      "sum": 30016.0
+     },
+     "error": null,
+     "peak_mb": 138.16,
+     "peak_delta_mb": 7.78
+    },
+    "hollow": {
+     "ms": [
+      1079.59,
+      1093.56,
+      1099.67
+     ],
+     "median_ms": 1093.56,
+     "min_ms": 1079.59,
+     "max_ms": 1099.67,
+     "prep_ms": 47.34,
+     "base_mb": 131.01,
+     "end_delta_mb": 12.46,
+     "fingerprint": {
+      "shell_faces": 51016.0,
+      "cavity_faces": 30536.0,
+      "shell_volume": 16245.7,
+      "cavity_volume": 96790.5
+     },
+     "error": null,
+     "peak_mb": 555.26,
+     "peak_delta_mb": 424.25
+    },
+    "cavity": {
+     "ms": [
+      961.45,
+      914.58,
+      905.82
+     ],
+     "median_ms": 914.58,
+     "min_ms": 905.82,
+     "max_ms": 961.45,
+     "prep_ms": 52.31,
+     "base_mb": 129.91,
+     "end_delta_mb": 4.06,
+     "fingerprint": {
+      "volume": 96677.1
+     },
+     "error": null,
+     "peak_mb": 549.91,
+     "peak_delta_mb": 420.0
+    },
+    "export_stl": {
+     "ms": [
+      4.13,
+      4.61,
+      4.11
+     ],
+     "median_ms": 4.13,
+     "min_ms": 4.11,
+     "max_ms": 4.61,
+     "prep_ms": 43.46,
+     "base_mb": 129.92,
+     "end_delta_mb": 6.09,
+     "fingerprint": {
+      "bytes": 1024080.0
+     },
+     "error": null,
+     "peak_mb": 129.96,
+     "peak_delta_mb": 0.04
+    },
+    "export_3mf": {
+     "ms": [
+      40.56,
+      40.53,
+      40.15
+     ],
+     "median_ms": 40.53,
+     "min_ms": 40.15,
+     "max_ms": 40.56,
+     "prep_ms": 45.71,
+     "base_mb": 131.15,
+     "end_delta_mb": 1.45,
+     "fingerprint": {
+      "bytes": 244023.0
+     },
+     "error": null,
+     "peak_mb": 132.59,
+     "peak_delta_mb": 1.44
+    },
+    "export_obj": {
+     "ms": [
+      21.41,
+      19.59,
+      22.54
+     ],
+     "median_ms": 21.41,
+     "min_ms": 19.59,
+     "max_ms": 22.54,
+     "prep_ms": 48.54,
+     "base_mb": 131.53,
+     "end_delta_mb": 3.27,
+     "fingerprint": {
+      "bytes": 737074.0
+     },
+     "error": null,
+     "peak_mb": 134.31,
+     "peak_delta_mb": 2.78
+    },
+    "export_ply": {
+     "ms": [
+      1.82,
+      1.24,
+      1.31
+     ],
+     "median_ms": 1.31,
+     "min_ms": 1.24,
+     "max_ms": 1.82,
+     "prep_ms": 45.3,
+     "base_mb": 131.53,
+     "end_delta_mb": 1.46,
+     "fingerprint": {
+      "bytes": 389363.0
+     },
+     "error": null,
+     "peak_mb": 130.58,
+     "peak_delta_mb": -0.95
+    }
+   }
+  },
+  "ball_82k": {
+   "model": "ball_82k",
+   "faces": 81920,
+   "stages": {
+    "load": {
+     "ms": [
+      86.68,
+      92.42,
+      88.51
+     ],
+     "median_ms": 88.51,
+     "min_ms": 86.68,
+     "max_ms": 92.42,
+     "prep_ms": 0.0,
+     "base_mb": 121.29,
+     "end_delta_mb": 1.03,
+     "fingerprint": {
+      "vertices": 40962.0,
+      "faces": 81920.0
+     },
+     "error": null,
+     "peak_mb": 135.12,
+     "peak_delta_mb": 13.83
+    },
+    "preview_payload": {
+     "ms": [
+      152.65,
+      138.72,
+      139.81
+     ],
+     "median_ms": 139.81,
+     "min_ms": 138.72,
+     "max_ms": 152.65,
+     "prep_ms": 0.0,
+     "base_mb": 140.56,
+     "end_delta_mb": 4.73,
+     "fingerprint": {
+      "vertex_count": 30002.0,
+      "face_count": 60000.0,
+      "b64_chars": 1440030.0,
+      "raw_bytes": 1080020.0
+     },
+     "error": null,
+     "peak_mb": 157.2,
+     "peak_delta_mb": 16.64
+    },
+    "analyze": {
+     "ms": [
+      536.71
+     ],
+     "median_ms": 536.71,
+     "min_ms": 536.71,
+     "max_ms": 536.71,
+     "prep_ms": 105.21,
+     "base_mb": 144.79,
+     "end_delta_mb": 27.74,
+     "fingerprint": {
+      "_error": "ValueError: einstein sum subscripts string contains too many subscripts for operand 0"
+     },
+     "error": "einstein sum subscripts string contains too many subscripts for operand 0",
+     "peak_mb": 362.25,
+     "peak_delta_mb": 217.46
+    },
+    "thick_field": {
+     "ms": [
+      17562.07,
+      19158.01,
+      18262.22
+     ],
+     "median_ms": 18262.22,
+     "min_ms": 17562.07,
+     "max_ms": 19158.01,
+     "prep_ms": 122.77,
+     "base_mb": 164.22,
+     "end_delta_mb": 9.35,
+     "fingerprint": {
+      "n": 40962.0,
+      "min": 59.996,
+      "p5": 59.996,
+      "max": 59.997,
+      "mean": 59.9963
+     },
+     "error": null,
+     "peak_mb": 192.2,
+     "peak_delta_mb": 27.98
+    },
+    "support_density": {
+     "ms": [
+      500.89,
+      526.77,
+      578.74
+     ],
+     "median_ms": 526.77,
+     "min_ms": 500.89,
+     "max_ms": 578.74,
+     "prep_ms": 131.3,
+     "base_mb": 166.29,
+     "end_delta_mb": 13.11,
+     "fingerprint": {
+      "count": 118.0,
+      "max": 15.0,
+      "n": 40962.0,
+      "mean": 2.93062,
+      "sum": 120044.0
+     },
+     "error": null,
+     "peak_mb": 189.57,
+     "peak_delta_mb": 23.28
+    },
+    "hollow": {
+     "ms": [
+      1257.39,
+      1143.01,
+      1067.2
+     ],
+     "median_ms": 1143.01,
+     "min_ms": 1067.2,
+     "max_ms": 1257.39,
+     "prep_ms": 121.2,
+     "base_mb": 166.09,
+     "end_delta_mb": 15.41,
+     "fingerprint": {
+      "shell_faces": 112456.0,
+      "cavity_faces": 30536.0,
+      "shell_volume": 16267.5,
+      "cavity_volume": 96814.5
+     },
+     "error": null,
+     "peak_mb": 584.9,
+     "peak_delta_mb": 418.81
+    },
+    "export_stl": {
+     "ms": [
+      16.01,
+      16.63,
+      15.23
+     ],
+     "median_ms": 16.01,
+     "min_ms": 15.23,
+     "max_ms": 16.63,
+     "prep_ms": 117.74,
+     "base_mb": 168.8,
+     "end_delta_mb": 13.3,
+     "fingerprint": {
+      "bytes": 4096080.0
+     },
+     "error": null,
+     "peak_mb": 179.43,
+     "peak_delta_mb": 10.63
+    }
+   }
+  },
+  "plate_thin": {
+   "model": "plate_thin",
+   "faces": 3072,
+   "stages": {
+    "analyze": {
+     "ms": [
+      236.97
+     ],
+     "median_ms": 236.97,
+     "min_ms": 236.97,
+     "max_ms": 236.97,
+     "prep_ms": 30.84,
+     "base_mb": 119.98,
+     "end_delta_mb": 3.38,
+     "fingerprint": {
+      "_error": "ValueError: operands could not be broadcast together with shapes (23406,) (23406,6) "
+     },
+     "error": "operands could not be broadcast together with shapes (23406,) (23406,6) ",
+     "peak_mb": 173.27,
+     "peak_delta_mb": 53.29
+    },
+    "thick_field": {
+     "ms": [
+      256.71,
+      256.96,
+      234.53
+     ],
+     "median_ms": 256.71,
+     "min_ms": 234.53,
+     "max_ms": 256.96,
+     "prep_ms": 33.45,
+     "base_mb": 122.71,
+     "end_delta_mb": 0.01,
+     "fingerprint": {
+      "n": 1538.0,
+      "min": 0.35,
+      "p5": 0.35,
+      "max": 60.0,
+      "mean": 37.5827
+     },
+     "error": null,
+     "peak_mb": 122.72,
+     "peak_delta_mb": 0.01
+    }
+   }
+  },
+  "broken_1k": {
+   "model": "broken_1k",
+   "faces": 1260,
+   "stages": {
+    "analyze": {
+     "ms": [
+      53.79,
+      51.44,
+      50.34
+     ],
+     "median_ms": 51.44,
+     "min_ms": 50.34,
+     "max_ms": 53.79,
+     "prep_ms": 27.04,
+     "base_mb": 122.03,
+     "end_delta_mb": -0.04,
+     "fingerprint": {
+      "quality": 47.0,
+      "grade": "D",
+      "items.watertight.sev": "error",
+      "items.watertight.val.boundary_edges": 96.0,
+      "items.watertight.val.nonmanifold_edges": 0.0,
+      "items.normals.sev": "error",
+      "items.normals.val.signed_volume": -63261.0,
+      "items.normals.val.degenerate_faces": 0.0,
+      "items.normals.val.winding_consistent": true,
+      "items.thickness.sev": "ok",
+      "items.thickness.val.samples": 0.0,
+      "items.thickness.val.min": 1.6,
+      "items.thickness.val.thin_ratio": 0.0,
+      "items.thickness.val.mode": "coarse",
+      "items.thickness.val.lower_bound": true,
+      "items.nonmanifold.sev": "ok",
+      "items.nonmanifold.val.count": 0.0,
+      "items.self_intersection.sev": "warning",
+      "items.self_intersection.val.count": 1234.0,
+      "items.self_intersection.val.duplicates": 0.0,
+      "items.self_intersection.val.coplanar_overlaps": 6.0,
+      "items.self_intersection.val.sampled": false,
+      "items.self_intersection.val.candidate_pairs": 7567.0,
+      "items.self_intersection.val.tested_pairs": 7327.0,
+      "items.self_intersection.val.tolerance": 8.65e-05,
+      "items.components.sev": "info",
+      "items.components.val.components": 2.0,
+      "items.components.val.tiny": 0.0,
+      "items.units.sev": "ok",
+      "items.units.val.unit": "mm",
+      "items.units.val.max_dim": 86.5,
+      "items.units.val.scale": 1.0,
+      "items.units.val.message": "最大尺寸 86.5mm，在绝大多数桌面机成型范围内，无需换算。"
+     },
+     "error": null,
+     "peak_mb": 128.11,
+     "peak_delta_mb": 6.08
+    },
+    "fill_holes": {
+     "ms": [
+      637.72,
+      12.25,
+      12.44
+     ],
+     "median_ms": 12.44,
+     "min_ms": 12.25,
+     "max_ms": 637.72,
+     "prep_ms": 30.14,
+     "base_mb": 451.9,
+     "end_delta_mb": 0.98,
+     "fingerprint": {
+      "method": "smooth",
+      "boundary_before": 96.0,
+      "boundary_after": 0.0,
+      "nonmanifold_after": 0.0,
+      "faces": 1292.0,
+      "vertices": 650.0
+     },
+     "error": null,
+     "peak_mb": 452.89,
+     "peak_delta_mb": 0.99
+    },
+    "fix_normals": {
+     "ms": [
+      2.2,
+      2.27,
+      2.33
+     ],
+     "median_ms": 2.27,
+     "min_ms": 2.2,
+     "max_ms": 2.33,
+     "prep_ms": 25.75,
+     "base_mb": 452.89,
+     "end_delta_mb": 0.0,
+     "fingerprint": {
+      "vol_before": -63261.0,
+      "vol_after": 63315.0,
+      "components": 2.0,
+      "flipped": 1.0,
+      "faces": 1260.0
+     },
+     "error": null,
+     "peak_mb": 452.89,
+     "peak_delta_mb": 0.0
+    }
+   }
+  },
+  "multi_5": {
+   "model": "multi_5",
+   "faces": 240,
+   "stages": {
+    "analyze": {
+     "ms": [
+      8.81
+     ],
+     "median_ms": 8.81,
+     "min_ms": 8.81,
+     "max_ms": 8.81,
+     "prep_ms": 26.96,
+     "base_mb": 119.76,
+     "end_delta_mb": 2.95,
+     "fingerprint": {
+      "_error": "ValueError: operands could not be broadcast together with shapes (810,) (810,6) "
+     },
+     "error": "operands could not be broadcast together with shapes (810,) (810,6) ",
+     "peak_mb": 122.16,
+     "peak_delta_mb": 2.4
+    },
+    "comp_field": {
+     "ms": [
+      0.79,
+      0.71,
+      0.64
+     ],
+     "median_ms": 0.71,
+     "min_ms": 0.64,
+     "max_ms": 0.79,
+     "prep_ms": 28.72,
+     "base_mb": 122.72,
+     "end_delta_mb": 0.0,
+     "fingerprint": {
+      "components": 5.0,
+      "sizes[0]": 600.0,
+      "sizes[1]": 600.0,
+      "sizes[2]": 600.0,
+      "sizes[3]": 600.0,
+      "sizes[4]": 600.0
+     },
+     "error": null,
+     "peak_mb": 122.72,
+     "peak_delta_mb": 0.0
+    }
+   }
+  },
+  "xintersect": {
+   "model": "xintersect",
+   "faces": 2560,
+   "stages": {
+    "analyze": {
+     "ms": [
+      384.9,
+      409.02,
+      387.48
+     ],
+     "median_ms": 387.48,
+     "min_ms": 384.9,
+     "max_ms": 409.02,
+     "prep_ms": 30.28,
+     "base_mb": 123.77,
+     "end_delta_mb": 0.67,
+     "fingerprint": {
+      "quality": 67.0,
+      "grade": "C",
+      "items.watertight.sev": "ok",
+      "items.watertight.val.boundary_edges": 0.0,
+      "items.normals.sev": "ok",
+      "items.normals.val.signed_volume": 28031.0,
+      "items.normals.val.degenerate_faces": 0.0,
+      "items.normals.val.winding_consistent": true,
+      "items.thickness.sev": "error",
+      "items.thickness.val.samples": 52.0,
+      "items.thickness.val.min": 0.17,
+      "items.thickness.val.median": 0.997,
+      "items.thickness.val.p5": 0.176,
+      "items.thickness.val.max": 1.999,
+      "items.thickness.val.thin_ratio": 0.2885,
+      "items.thickness.val.fail_ratio": 0.1346,
+      "items.thickness.val.directions": 3.0,
+      "items.thickness.val.mode": "full",
+      "items.nonmanifold.sev": "ok",
+      "items.nonmanifold.val.count": 0.0,
+      "items.self_intersection.sev": "warning",
+      "items.self_intersection.val.count": 2473.0,
+      "items.self_intersection.val.duplicates": 0.0,
+      "items.self_intersection.val.coplanar_overlaps": 0.0,
+      "items.self_intersection.val.sampled": false,
+      "items.self_intersection.val.candidate_pairs": 17952.0,
+      "items.self_intersection.val.tested_pairs": 15846.0,
+      "items.self_intersection.val.tolerance": 4e-05,
+      "items.components.sev": "info",
+      "items.components.val.components": 2.0,
+      "items.components.val.tiny": 0.0,
+      "items.units.sev": "ok",
+      "items.units.val.unit": "mm",
+      "items.units.val.max_dim": 40.0,
+      "items.units.val.scale": 1.0,
+      "items.units.val.message": "最大尺寸 40.0mm，在绝大多数桌面机成型范围内，无需换算。"
+     },
+     "error": null,
+     "peak_mb": 136.43,
+     "peak_delta_mb": 12.66
+    }
+   }
+  },
+  "overhang_t": {
+   "model": "overhang_t",
+   "faces": 576,
+   "stages": {
+    "analyze": {
+     "ms": [
+      24.73
+     ],
+     "median_ms": 24.73,
+     "min_ms": 24.73,
+     "max_ms": 24.73,
+     "prep_ms": 26.27,
+     "base_mb": 119.79,
+     "end_delta_mb": 1.57,
+     "fingerprint": {
+      "_error": "ValueError: operands could not be broadcast together with shapes (3582,) (3582,6) "
+     },
+     "error": "operands could not be broadcast together with shapes (3582,) (3582,6) ",
+     "peak_mb": 129.08,
+     "peak_delta_mb": 9.29
+    },
+    "overhang_field": {
+     "ms": [
+      0.36,
+      0.35,
+      0.34
+     ],
+     "median_ms": 0.35,
+     "min_ms": 0.34,
+     "max_ms": 0.36,
+     "prep_ms": 24.32,
+     "base_mb": 121.3,
+     "end_delta_mb": 0.0,
+     "fingerprint": {
+      "n": 292.0,
+      "min": 0.0,
+      "max": 180.0,
+      "mean": 85.0685
+     },
+     "error": null,
+     "peak_mb": 121.3,
+     "peak_delta_mb": 0.0
+    },
+    "build_supports": {
+     "ms": [
+      44.56,
+      55.75,
+      52.09
+     ],
+     "median_ms": 52.09,
+     "min_ms": 44.56,
+     "max_ms": 55.75,
+     "prep_ms": 27.19,
+     "base_mb": 122.48,
+     "end_delta_mb": 0.11,
+     "fingerprint": {
+      "count": 125.0,
+      "segments": 125.0,
+      "faces": 5000.0,
+      "note": ""
+     },
+     "error": null,
+     "peak_mb": 122.59,
+     "peak_delta_mb": 0.11
+    },
+    "support_density": {
+     "ms": [
+      46.47,
+      41.98,
+      53.86
+     ],
+     "median_ms": 46.47,
+     "min_ms": 41.98,
+     "max_ms": 53.86,
+     "prep_ms": 27.21,
+     "base_mb": 122.64,
+     "end_delta_mb": 0.0,
+     "fingerprint": {
+      "count": 125.0,
+      "max": 15.0,
+      "n": 292.0,
+      "mean": 7.99658,
+      "sum": 2335.0
+     },
+     "error": null,
+     "peak_mb": 122.64,
+     "peak_delta_mb": 0.0
+    }
+   }
+  },
+  "inch_254": {
+   "model": "inch_254",
+   "faces": 12,
+   "stages": {
+    "analyze": {
+     "ms": [
+      4.72
+     ],
+     "median_ms": 4.72,
+     "min_ms": 4.72,
+     "max_ms": 4.72,
+     "prep_ms": 30.15,
+     "base_mb": 120.12,
+     "end_delta_mb": 1.07,
+     "fingerprint": {
+      "_error": "ValueError: operands could not be broadcast together with shapes (2,) (2,6) "
+     },
+     "error": "operands could not be broadcast together with shapes (2,) (2,6) ",
+     "peak_mb": 120.79,
+     "peak_delta_mb": 0.67
+    }
+   }
+  },
+  "statue_30k": {
+   "model": "statue_30k",
+   "faces": 20480,
+   "stages": {
+    "hollow": {
+     "ms": [
+      495.05,
+      478.43,
+      491.39
+     ],
+     "median_ms": 491.39,
+     "min_ms": 478.43,
+     "max_ms": 495.05,
+     "prep_ms": 49.01,
+     "base_mb": 121.32,
+     "end_delta_mb": 7.61,
+     "fingerprint": {
+      "shell_faces": 29888.0,
+      "cavity_faces": 9408.0,
+      "shell_volume": 9873.34,
+      "cavity_volume": 46644.8
+     },
+     "error": null,
+     "peak_mb": 294.19,
+     "peak_delta_mb": 172.87
+    },
+    "cavity": {
+     "ms": [
+      436.82,
+      529.95,
+      514.12
+     ],
+     "median_ms": 514.12,
+     "min_ms": 436.82,
+     "max_ms": 529.95,
+     "prep_ms": 48.9,
+     "base_mb": 122.39,
+     "end_delta_mb": 3.05,
+     "fingerprint": {
+      "volume": 46925.6
+     },
+     "error": null,
+     "peak_mb": 289.74,
+     "peak_delta_mb": 167.35
+    },
+    "export_stl": {
+     "ms": [
+      6.35,
+      6.16,
+      4.47
+     ],
+     "median_ms": 6.16,
+     "min_ms": 4.47,
+     "max_ms": 6.35,
+     "prep_ms": 53.62,
+     "base_mb": 122.43,
+     "end_delta_mb": 5.06,
+     "fingerprint": {
+      "bytes": 1024080.0
+     },
+     "error": null,
+     "peak_mb": 124.11,
+     "peak_delta_mb": 1.68
+    },
+    "export_3mf": {
+     "ms": [
+      45.47,
+      54.67,
+      50.21
+     ],
+     "median_ms": 50.21,
+     "min_ms": 45.47,
+     "max_ms": 54.67,
+     "prep_ms": 51.8,
+     "base_mb": 123.55,
+     "end_delta_mb": 0.59,
+     "fingerprint": {
+      "bytes": 272149.0
+     },
+     "error": null,
+     "peak_mb": 124.14,
+     "peak_delta_mb": 0.59
+    }
+   }
+  },
+  "degenerate": {
+   "model": "degenerate",
+   "faces": 3,
+   "stages": {
+    "analyze": {
+     "ms": [
+      5.49,
+      3.94,
+      4.5
+     ],
+     "median_ms": 4.5,
+     "min_ms": 3.94,
+     "max_ms": 5.49,
+     "prep_ms": 29.99,
+     "base_mb": 120.69,
+     "end_delta_mb": 0.03,
+     "fingerprint": {
+      "quality": 77.0,
+      "grade": "B",
+      "items.watertight.sev": "error",
+      "items.watertight.val.boundary_edges": 4.0,
+      "items.watertight.val.nonmanifold_edges": 0.0,
+      "items.normals.sev": "warning",
+      "items.normals.val.signed_volume": 0.0,
+      "items.normals.val.degenerate_faces": 1.0,
+      "items.normals.val.winding_consistent": true,
+      "items.thickness.sev": "ok",
+      "items.thickness.val.samples": 0.0,
+      "items.thickness.val.min": 1.6,
+      "items.thickness.val.thin_ratio": 0.0,
+      "items.thickness.val.mode": "coarse",
+      "items.thickness.val.lower_bound": true,
+      "items.nonmanifold.sev": "ok",
+      "items.nonmanifold.val.count": 0.0,
+      "items.self_intersection.sev": "ok",
+      "items.self_intersection.val.count": 0.0,
+      "items.self_intersection.val.duplicates": 0.0,
+      "items.self_intersection.val.coplanar_overlaps": 0.0,
+      "items.self_intersection.val.sampled": false,
+      "items.self_intersection.val.candidate_pairs": 1.0,
+      "items.self_intersection.val.tested_pairs": 1.0,
+      "items.self_intersection.val.tolerance": 2e-06,
+      "items.components.sev": "ok",
+      "items.components.val.components": 1.0,
+      "items.units.sev": "ok",
+      "items.units.val.unit": "mm",
+      "items.units.val.max_dim": 2.0,
+      "items.units.val.scale": 1.0,
+      "items.units.val.message": "最大尺寸 2.0mm，在绝大多数桌面机成型范围内，无需换算。"
+     },
+     "error": null,
+     "peak_mb": 120.71,
+     "peak_delta_mb": 0.02
+    }
+   }
+  },
+  "ascii_20k": {
+   "model": "ascii_20k",
+   "faces": 20480,
+   "stages": {
+    "load": {
+     "ms": [
+      84.8,
+      82.47,
+      87.3
+     ],
+     "median_ms": 84.8,
+     "min_ms": 82.47,
+     "max_ms": 87.3,
+     "prep_ms": 0.0,
+     "base_mb": 121.71,
+     "end_delta_mb": 1.29,
+     "fingerprint": {
+      "vertices": 10242.0,
+      "faces": 20480.0
+     },
+     "error": null,
+     "peak_mb": 143.03,
+     "peak_delta_mb": 21.32
+    }
+   }
+  }
+ },
+ "wall_s": 152.5
+}

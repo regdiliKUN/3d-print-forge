@@ -1,0 +1,1 @@
+{"model": "ascii_20k", "faces": 20480, "stages": {"load": {"ms": [78.91, 84.75, 77.57], "median_ms": 78.91, "min_ms": 77.57, "max_ms": 84.75, "prep_ms": 0.0, "base_mb": 121.36, "end_delta_mb": 2.09, "fingerprint": {"vertices": 10242.0, "faces": 20480.0}, "error": null, "peak_mb": 144.19, "peak_delta_mb": 22.83}}}

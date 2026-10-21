@@ -16,9 +16,16 @@ SEV_ORDER = {"ok": 0, "info": 1, "warning": 2, "error": 3}
 
 # ---------------------------------------------------------------- 几何工具
 def edge_keys(faces: np.ndarray, nverts: int) -> np.ndarray:
-    """把每条无向边编码成单个 int64，便于快速计数。"""
+    """把每条无向边编码成单个 int64，便于快速计数。
+
+    nverts 必须大于最大顶点索引，否则两个不同的边可能编码成同一个 key，
+    把开放边误判成流形边。外部文件索引越界时这里自行收紧，而不是相信调用方。
+    """
+    if len(faces) == 0:
+        return np.zeros(0, dtype=np.int64)
+    nverts = max(int(nverts), int(np.max(faces)) + 1, 1)
     e = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
-    e.sort(axis=1)
+    e = np.sort(e, axis=1)
     return e[:, 0].astype(np.int64) * int(nverts) + e[:, 1].astype(np.int64)
 
 
@@ -35,6 +42,17 @@ def edge_histogram(faces: np.ndarray, nverts: int) -> dict:
     }
 
 
+def duplicate_face_count(faces: np.ndarray) -> int:
+    """顶点集合完全相同的多余面数量（每组保留一个，其余计数）。
+
+    只数开放边/非流形边发现不了「整张面被复制一遍」：每条边照样有两个面，
+    但实际是 4 个面共享，切片器会得到两张重合的皮。必须按面去重后才能判断。
+    """
+    if len(faces) < 2:
+        return 0
+    return int(len(faces) - len(np.unique(np.sort(np.asarray(faces), axis=1), axis=0)))
+
+
 def tri_areas(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
     if len(faces) == 0:
         return np.zeros(0, np.float64)
@@ -47,6 +65,103 @@ def signed_volume(verts: np.ndarray, faces: np.ndarray) -> float:
         return 0.0
     t = verts[faces].astype(np.float64)
     return float(np.einsum("ij,ij->i", t[:, 0], np.cross(t[:, 1], t[:, 2])).sum() / 6.0)
+
+
+def winding_conflict_count(faces: np.ndarray) -> int:
+    """统计「两个面沿同一条边绕序相同」的边数。
+
+    这是比 `mesh.is_winding_consistent` 更可解释的指标：一条边上的两个面
+    本应一正一反，若方向相同，说明其中一个面被翻过。补洞/镜像/布尔残渣
+    都会留下这种边。
+    """
+    if len(faces) < 2:
+        return 0
+    e = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    key = np.sort(e, axis=1)
+    direction = np.where(e[:, 0] < e[:, 1], 1, -1)
+    _uniq, inv = np.unique(key, axis=0, return_inverse=True)
+    inv = inv.reshape(-1)
+    pos = np.bincount(inv[direction > 0], minlength=len(_uniq))
+    neg = np.bincount(inv[direction < 0], minlength=len(_uniq))
+    return int(((pos > 1) | (neg > 1)).sum())
+
+
+def component_volumes(verts: np.ndarray, faces: np.ndarray) -> tuple[int, np.ndarray, np.ndarray]:
+    """按边连通分量计算有向体积，返回 (分量数, 每个面的标签, 每个分量的体积)。"""
+    n, labels = union_components(faces, len(verts))
+    vols = np.zeros(n, dtype=np.float64)
+    if n == 0:
+        return 0, labels, vols
+    for c in range(n):
+        vols[c] = signed_volume(verts, faces[labels == c])
+    return n, labels, vols
+
+
+def classify_components(verts: np.ndarray, faces: np.ndarray,
+                        small_ratio: float = 0.01) -> dict:
+    """把连通分量分成 实体 / 内腔 / 碎屑 三类。
+
+    判据不是「体积为负就是内腔」：一块翻面的小碎屑也是负体积。负体积分量
+    必须位于某个正体积实体内部才算内腔；在外面的负体积分量是碎屑。
+    返回的 sizes 按面积降序，供检测报告与移除碎屑动作共用，避免两处各写一套。
+    """
+    verts = np.asarray(verts, dtype=np.float64)
+    faces = np.asarray(faces)
+    n, labels = union_components(faces, len(verts))
+    if n == 0:
+        return {"components": 0, "sizes": [], "tiny": 0, "cavities": 0, "labels": labels}
+    areas = tri_areas(verts, faces)
+    sizes = []
+    for c in range(n):
+        m = labels == c
+        sizes.append({
+            "id": c,
+            "faces": int(m.sum()),
+            "area": float(areas[m].sum()),
+            "volume": float(signed_volume(verts, faces[m])),
+        })
+    ext = float(max(np.ptp(verts, axis=0))) if len(verts) else 1.0
+    vol_tol = max(1e-12, ext ** 3 * 1e-12)
+    positive = [s for s in sizes if s["volume"] >= -vol_tol]
+    base = max((s["area"] for s in positive), default=max(s["area"] for s in sizes))
+    solid = None
+    negatives = [s for s in sizes if s["volume"] < -vol_tol]
+    if negatives and positive:
+        try:
+            import trimesh
+
+            pos_ids = [s["id"] for s in positive]
+            solid = trimesh.Trimesh(
+                vertices=verts,
+                faces=faces[np.isin(labels, pos_ids)],
+                process=False,
+            )
+        except Exception:  # noqa: BLE001
+            solid = None
+
+    cavities = 0
+    tiny = 0
+    rejected_cavities = 0
+    for s in sizes:
+        if s["volume"] < -vol_tol:
+            inside = True
+            if solid is not None and len(solid.faces):
+                pts = verts[faces[labels == s["id"]]].reshape(-1, 3)
+                sample = np.vstack([pts.mean(axis=0), pts[:: max(1, len(pts) // 16)][:16]])
+                try:
+                    inside = bool(np.mean(solid.contains(sample)) >= 0.5)
+                except Exception:  # noqa: BLE001
+                    inside = True
+            s["kind"] = "cavity" if inside else "debris"
+            cavities += int(inside)
+            rejected_cavities += int(not inside)
+            tiny += int(not inside)
+        else:
+            s["kind"] = "debris" if s["area"] < base * small_ratio else "solid"
+            tiny += int(s["kind"] == "debris")
+    sizes.sort(key=lambda x: -x["area"])
+    return {"components": n, "sizes": sizes, "tiny": tiny, "cavities": cavities,
+            "rejected_cavities": rejected_cavities, "labels": labels}
 
 
 def face_normals(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
@@ -107,8 +222,121 @@ def sat_overlap(T1: np.ndarray, T2: np.ndarray, tol: float = 1e-9, parallel_tol:
     return overlap & ~parallel
 
 
+def _unit(v: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    ln = np.linalg.norm(v, axis=1)
+    return v / np.where(ln > 1e-12, ln, 1.0)[:, None], ln
+
+
+def _plane_cut_interval(tri: np.ndarray, dist: np.ndarray, axis: np.ndarray):
+    """三角形与「过另一三角形平面」的交线区间在 axis 上的投影。
+
+    tri (K,3,3)、dist (K,3) 是三个顶点到另一平面的有向距离。
+    只有真正穿过平面的边（两端异号）才贡献交点；用 3 条边的交点投影
+    取 min/max 就是凸三角形与该交线相交的那一段。
+    """
+    qs = []
+    for i, j in ((0, 1), (1, 2), (2, 0)):
+        si, sj = dist[:, i], dist[:, j]
+        denom = si - sj
+        # 顶点正好落在另一平面上时，该端点是交段的一部分，也要计入
+        good = (si * sj <= 0) & (np.abs(denom) > 1e-15)
+        t = np.divide(si, denom, out=np.zeros_like(si), where=np.abs(denom) > 1e-15)
+        p = tri[:, i] + t[:, None] * (tri[:, j] - tri[:, i])
+        q = np.einsum("ij,ij->i", p, axis)
+        qs.append(np.where(good, q, np.nan))
+    q = np.stack(qs, axis=1)
+    cnt = np.sum(~np.isnan(q), axis=1)
+    lo = np.nanmin(q, axis=1, initial=np.inf)
+    hi = np.nanmax(q, axis=1, initial=-np.inf)
+    return lo, hi, cnt >= 2
+
+
+def _coplanar_overlap_2d(T1: np.ndarray, T2: np.ndarray, n1: np.ndarray, tol: float) -> np.ndarray:
+    """共面三角形的 2D SAT：6 条边的法向都要有正长度重叠才算真重叠。
+
+    相邻三角形只共享一条边时，沿该边法向的投影刚好接触（重叠长度为 0），
+    会被排除；整张面被复制/两张面同向叠在一起时，6 个轴向都有正重叠。
+    """
+    e0 = T1[:, 1] - T1[:, 0]
+    u, ln = _unit(e0)
+    # 退化边时退回任意与法向不平行的方向
+    fallback = np.tile(np.array([1.0, 0.0, 0.0]), (len(T1), 1))
+    u = np.where((ln > 1e-12)[:, None], u, fallback)
+    v, _ = _unit(np.cross(n1, u))
+    P = np.concatenate([
+        np.stack([np.einsum("kij,kj->ki", T1, u),
+                  np.einsum("kij,kj->ki", T1, v)], axis=2),
+        np.stack([np.einsum("kij,kj->ki", T2, u),
+                  np.einsum("kij,kj->ki", T2, v)], axis=2),
+    ], axis=1)  # (K,6,2)
+    edges = np.stack([P[:, (i + 1) % 3] - P[:, i] for i in range(3)]
+                     + [P[:, 3 + (i + 1) % 3] - P[:, 3 + i] for i in range(3)], axis=1)  # (K,6,2)
+    axes = np.stack([-edges[:, :, 1], edges[:, :, 0]], axis=2)
+    alen = np.linalg.norm(axes, axis=2)
+    valid = alen > 1e-12
+    axes = axes / np.where(valid, alen, 1.0)[:, :, None]
+    # 每个点投影到每条候选轴：K × 6 点 × 6 轴
+    proj = np.einsum("kij,klj->kil", P, axes)
+    lo1, hi1 = proj[:, :3, :].min(axis=1), proj[:, :3, :].max(axis=1)
+    lo2, hi2 = proj[:, 3:, :].min(axis=1), proj[:, 3:, :].max(axis=1)
+    overlap = (np.minimum(hi1, hi2) - np.maximum(lo1, lo2)) > tol
+    return np.all(overlap | ~valid, axis=1)
+
+
+def tri_tri_overlap(T1: np.ndarray, T2: np.ndarray, tol: float = 1e-7) -> tuple[np.ndarray, np.ndarray]:
+    """三角形对是否真正相交，返回 (hit, coplanar)。
+
+    与旧 SAT 的差别：
+    - 共面不再一律视为「相邻」而跳过。共面重叠（复制面、双层皮）是真实缺陷，
+      用 2D SAT 判，只有正长度重叠才算。
+    - 非共面用「两平面交线区间重叠」判，共享一个顶点的折叠面也能检出；
+      仅共享一条边的邻居只接触不重叠，不会被误报。
+    - 退化三角形直接跳过。
+    """
+    K = len(T1)
+    if K == 0:
+        return np.zeros(0, dtype=bool), np.zeros(0, dtype=bool)
+    raw1 = np.cross(T1[:, 1] - T1[:, 0], T1[:, 2] - T1[:, 0])
+    raw2 = np.cross(T2[:, 1] - T2[:, 0], T2[:, 2] - T2[:, 0])
+    n1, l1 = _unit(raw1)
+    n2, l2 = _unit(raw2)
+    degenerate = (l1 <= 1e-12) | (l2 <= 1e-12)
+
+    d1 = np.einsum("ij,ij->i", n1, T1[:, 0])
+    d2 = np.einsum("ij,ij->i", n2, T2[:, 0])
+    s2 = np.einsum("kj,kij->ki", n2, T1) - d2[:, None]   # T1 顶点到平面2
+    s1 = np.einsum("kj,kij->ki", n1, T2) - d1[:, None]   # T2 顶点到平面1
+
+    sep = ((s1 > tol).all(1) | (s1 < -tol).all(1)
+           | (s2 > tol).all(1) | (s2 < -tol).all(1))
+    coplanar = (np.abs(s1).max(1) <= tol) & (np.abs(s2).max(1) <= tol)
+
+    D = np.cross(n1, n2)
+    Dl = np.linalg.norm(D, axis=1)
+    usable = ~(sep | degenerate)
+    hit = np.zeros(K, dtype=bool)
+
+    # 共面：2D 多边形重叠
+    cop_ok = usable & coplanar
+    if cop_ok.any():
+        hit[cop_ok] = _coplanar_overlap_2d(T1[cop_ok], T2[cop_ok], n1[cop_ok], tol)
+
+    # 非共面：交线方向必须存在，且两三角形与交线的交段有正长度重叠
+    non = usable & ~coplanar & (Dl > 1e-12)
+    if non.any():
+        Dn = D[non] / Dl[non, None]
+        lo1, hi1, ok1 = _plane_cut_interval(T1[non], s2[non], Dn)
+        lo2, hi2, ok2 = _plane_cut_interval(T2[non], s1[non], Dn)
+        over = (np.minimum(hi1, hi2) - np.maximum(lo1, lo2)) > tol
+        hit[non] = ok1 & ok2 & over
+
+    # 平行但相距超过容差：sep 已排除；平行且距离都在容差内即共面分支
+    hit[degenerate] = False
+    return hit, coplanar & hit
+
+
 def find_self_intersections(verts: np.ndarray, faces: np.ndarray, max_pairs: int = 400_000) -> dict:
-    """KD 树取局部候选对，再用 SAT 精判。自交在物理上都是局部的，这个近似足够。"""
+    """KD 树取局部候选对，再做精确三角-三角相交判定。自交在物理上都是局部的。"""
     from scipy.spatial import cKDTree
 
     if len(faces) < 2:
@@ -130,56 +358,77 @@ def find_self_intersections(verts: np.ndarray, faces: np.ndarray, max_pairs: int
         idx = np.random.default_rng(7).choice(len(pairs), max_pairs, replace=False)
         pairs = pairs[idx]
         sampled = True
-    # 排除共享顶点的相邻面
+    candidate_pairs = int(len(pairs))
+    # 共享顶点数：3=完全重复的面；2=共边的邻居，只沿边接触不算穿插；
+    # 1=共顶点（折叠面可能真穿插，要判）；0=普通候选对。
     f1, f2 = faces[pairs[:, 0]], faces[pairs[:, 1]]
-    share = (
-        (f1[:, 0] == f2[:, 0]) | (f1[:, 0] == f2[:, 1]) | (f1[:, 0] == f2[:, 2])
-        | (f1[:, 1] == f2[:, 0]) | (f1[:, 1] == f2[:, 1]) | (f1[:, 1] == f2[:, 2])
-        | (f1[:, 2] == f2[:, 0]) | (f1[:, 2] == f2[:, 1]) | (f1[:, 2] == f2[:, 2])
-    )
-    pairs = pairs[~share]
-    if len(pairs) == 0:
-        return {"count": 0, "pairs": [], "sampled": sampled}
-    # AABB 粗筛
+    share = (f1[:, :, None] == f2[:, None, :]).any(axis=2).sum(axis=1)
+
+    # AABB 粗筛（先做，便宜）
     amin = t[pairs[:, 0]].min(axis=1)
     amax = t[pairs[:, 0]].max(axis=1)
     bmin = t[pairs[:, 1]].min(axis=1)
     bmax = t[pairs[:, 1]].max(axis=1)
     box_ok = np.all(amin <= bmax + 1e-9, axis=1) & np.all(bmin <= amax + 1e-9, axis=1)
-    pairs = pairs[box_ok]
+    pairs, share = pairs[box_ok], share[box_ok]
     if len(pairs) == 0:
-        return {"count": 0, "pairs": [], "sampled": sampled}
+        return {"count": 0, "pairs": [], "sampled": sampled, "candidate_pairs": candidate_pairs}
+
+    dup_pairs = pairs[share >= 3]
+    # 共边邻居只沿共享边接触，是合法拓扑；共顶点（share=1）和不共顶点（share=0）才做精确判定
+    test_pairs = pairs[share < 2]
     scale = float(max(np.ptp(verts, axis=0))) or 1.0
-    hit = sat_overlap(t[pairs[:, 0]], t[pairs[:, 1]], tol=max(1e-9, scale * 1e-6))
-    bad = pairs[hit]
+    tol = max(1e-9, scale * 1e-6)
+    if len(test_pairs):
+        hit, cop = tri_tri_overlap(t[test_pairs[:, 0]], t[test_pairs[:, 1]], tol=tol)
+    else:
+        hit, cop = np.zeros(0, bool), np.zeros(0, bool)
+    bad = np.concatenate([dup_pairs, test_pairs[hit]]) if len(test_pairs) else dup_pairs
     return {
         "count": int(len(bad)),
         "pairs": bad[:500].tolist(),
+        "duplicates": int(len(dup_pairs)),
+        "coplanar_overlaps": int(len(dup_pairs) + int(cop.sum())),
         "sampled": sampled,
-        "candidate_pairs": int(len(pairs)),
+        "candidate_pairs": candidate_pairs,
+        "tested_pairs": int(len(test_pairs)),
+        "tolerance": tol,
     }
 
 
 # ---------------------------------------------------------------- 壁厚
-def _mt_batch(origin: np.ndarray, direction: np.ndarray, tris: np.ndarray) -> np.ndarray:
-    """Möller–Trumbore：单条射线对一批三角形求交，返回命中参数 t。"""
-    v0 = tris[:, 0]
-    e1 = tris[:, 1] - v0
-    e2 = tris[:, 2] - v0
-    pvec = np.cross(direction, e2)
+# 一次送进批量求交的射线数。太小则 numpy 调度开销占比高，太大则候选矩阵占内存。
+_RAY_CHUNK = 48
+# 分段查询的段数上限。射线是一条「线」，但拿去查询的却是它的「包围盒」——
+# 一条斜穿模型的射线，包围盒的选择度和整个模型差不多，于是近四分之一的三角形
+# 都成了候选。切成 K 段后每段盒子体积按 1/K³ 缩、候选总数按 1/K² 降，
+# 代价是 K 倍的查询调用开销（实测每次约几十微秒），所以 K 必须随三角形密度走：
+# 稀疏的小模型分段只会白付调用开销，密集的大模型才划得来。
+_RAY_SUBSPLIT_MAX = 6
+
+
+def _mt_pairs(origins: np.ndarray, dirs: np.ndarray, tris: np.ndarray) -> np.ndarray:
+    """批量 Möller–Trumbore：一次性算 P 个 (射线, 三角形) 对的交点参数 t。
+
+    与旧的逐条版本区别：未命中返回 +inf 而不是丢弃行，这样才能按射线号
+    分段归约取最小值。每条算式的操作数与逐条调用时逐一相同，
+    所以命中判定与 t 的数值是逐位一致的，不会改变任何几何结论。
+    """
+    v0 = tris[:, 0, :]
+    e1 = tris[:, 1, :] - v0
+    e2 = tris[:, 2, :] - v0
+    pvec = np.cross(dirs, e2)
     det = np.einsum("ij,ij->i", e1, pvec)
     ok = np.abs(det) > 1e-12
-    if not ok.any():
-        return np.zeros(0)
-    inv = np.zeros_like(det)
-    inv[ok] = 1.0 / det[ok]
-    tvec = origin - v0
+    safe = np.where(ok, det, 1.0)
+    inv = np.where(ok, 1.0 / safe, 0.0)
+    tvec = origins - v0
     u = np.einsum("ij,ij->i", tvec, pvec) * inv
     qvec = np.cross(tvec, e1)
-    v = np.einsum("j,ij->i", direction, qvec) * inv
+    v = np.einsum("ij,ij->i", dirs, qvec) * inv
     t = np.einsum("ij,ij->i", e2, qvec) * inv
     hit = ok & (u >= -1e-9) & (u <= 1 + 1e-9) & (v >= -1e-9) & (u + v <= 1 + 1e-9) & (t > 0)
-    return t[hit]
+    return np.where(hit, t, np.inf)
 
 
 _RAY_INDEX_CACHE: dict = {}
@@ -192,7 +441,7 @@ def _raycast_nearest(verts: np.ndarray, faces: np.ndarray, origins: np.ndarray,
 
     不用 trimesh 的 ray：它会对「射线数 × 三角形数」做全量 AABB 矩阵，
     6000 条射线 × 2 万面就是 1.2 亿个 float64，内存直接冲到 4.7GB、耗时 46 秒。
-    这里按射线的 AABB 从索引里取候选，只对候选做求交，量级降到千分之一。
+    这里按射线的 AABB 从索引里取候选，只对候选做求交。
 
     max_dist 用来截断射线：壁厚判定只关心「有没有比阈值更薄的地方」，
     射线飞 200mm 才命中的位置记为 200 和记为 12 对结论没有区别，
@@ -200,16 +449,18 @@ def _raycast_nearest(verts: np.ndarray, faces: np.ndarray, origins: np.ndarray,
     """
     from rtree import index as rtree_index
 
-    key = (id(verts), len(faces))
+    key = (id(verts), id(faces), len(faces))
     tri = verts[faces]
     cached = _RAY_INDEX_CACHE.get(key)
-    # 必须同时校验对象身份：id() 是内存地址，前一个数组被回收后地址会被复用，
-    # 只按 id 做 key 会拿到**别的模型**的索引，射线全部落空（表现为「0 命中」）。
-    if cached is not None and cached[1] is verts:
+    # 必须同时校验两个数组的对象身份：id() 是内存地址，前一个数组被回收后地址会被复用；
+    # 只校验 verts 会漏掉「verts 没变、faces 被替换」的情况，拿到旧索引后射线全落空。
+    if cached is not None and cached[1] is verts and cached[2] is faces:
         idx = cached[0]
+        mlo, mhi = cached[3], cached[4]
     else:
         lo = tri.min(axis=1)
         hi = tri.max(axis=1)
+        mlo, mhi = lo.min(axis=0), hi.max(axis=0)
         prop = rtree_index.Property()
         prop.dimension = 3
         # 用生成器批量建索引，逐条 insert 在两万面上要好几秒
@@ -220,28 +471,88 @@ def _raycast_nearest(verts: np.ndarray, faces: np.ndarray, origins: np.ndarray,
         idx = rtree_index.Index(_stream(), properties=prop)
         if len(_RAY_INDEX_CACHE) > 2:
             _RAY_INDEX_CACHE.clear()
-        # 存住 verts 引用，避免它被回收后 id 被别的数组复用
-        _RAY_INDEX_CACHE[key] = (idx, verts)
+        # 存住两个数组的引用，避免它们被回收后 id 被别的数组复用
+        _RAY_INDEX_CACHE[key] = (idx, verts, faces, mlo, mhi)
 
-    out = np.full(len(origins), np.inf)
-    span = float(np.linalg.norm(np.ptp(verts, axis=0))) * 1.2 + 1e-6
+    n = len(origins)
+    out = np.full(n, np.inf)
+    if n == 0 or len(tri) == 0:
+        return out
+
+    span = float(np.linalg.norm(mhi - mlo)) * 1.2 + 1e-6
     if max_dist is not None:
         span = min(span, float(max_dist))
-    for k in range(len(origins)):
-        o = origins[k]
-        d = dirs[k]
-        end = o + d * span
-        box = (
-            min(o[0], end[0]), min(o[1], end[1]), min(o[2], end[2]),
-            max(o[0], end[0]), max(o[1], end[1]), max(o[2], end[2]),
-        )
-        cand = list(idx.intersection(box))
-        if not cand:
+
+    # 把射线段裁到模型包围盒内。三角形整体落在包围盒内，所以命中点不可能
+    # 在射线穿出包围盒之后——裁剪是**精确**的，不会漏命中，只是把查询盒
+    # 从「包围盒对角线 × 1.2」缩到射线真正穿行模型那一段。
+    # 逐轴求进出参数（slab 法）。方向分量可能为 0，除以 0 得 ±inf 或 nan，
+    # 这里用极小值代替 0，语义上等价于「该轴上与这对平面平行且身在其中」。
+    dd = np.where(np.abs(dirs) < 1e-12, 1e-12, dirs)
+    ta = (mlo[None, :] - origins) / dd
+    tb = (mhi[None, :] - origins) / dd
+    tnear = np.minimum(ta, tb).max(axis=1)
+    tfar = np.maximum(ta, tb).min(axis=1)
+    # 整条射线都在盒外时 tnear > tfar，此时不可能命中任何三角形。
+    # 查询范围额外留一点余量：贴在盒壁上的三角形，算出来的 tnear/tfar 会与
+    # 求交算出的 t 差几个 ulp，不留余量会把正好命中盒壁的那次判成盒外。
+    slack = span * 1e-6 + 1e-9
+    eff = np.where(tfar >= tnear, np.minimum(span, np.maximum(tfar, 0.0) + slack), 0.0)
+
+
+    # 分段数按三角形密度选：同样的模型尺寸，面数越多单个三角形越小、
+    # 一段盒子里的候选越多，才值得细分。
+    if len(tri) < 4000:
+        k_splits = 1
+    elif len(tri) > 60000:
+        k_splits = _RAY_SUBSPLIT_MAX
+    else:
+        k_splits = 4
+    # 平均三角形边长的量级，用来判断射线够不够长、值不值得分段
+    tri_side = float(np.max(mhi - mlo)) / max(1.0, len(tri) ** (1.0 / 3.0))
+
+    # 成批取候选、成批求交：逐条射线各调一次 _mt_batch 时，每次都要过一遍
+    # numpy 调度开销，3000 条射线就是 3000 次；成批后算的是同一批 (射线,三角形) 对。
+    for a in range(0, n, _RAY_CHUNK):
+        b = min(a + _RAY_CHUNK, n)
+        parts_t: list[np.ndarray] = []
+        parts_r: list[np.ndarray] = []
+        for k in range(a, b):
+            L = eff[k]
+            if L <= 0:
+                continue
+            o = origins[k]
+            dv = dirs[k]
+            # 沿射线把 [0, L] 均分成 K 段，逐段取候选。
+            # 命中点必然落在其中某一段上，而三角形的包围盒包含该命中点、
+            # 该段的包围盒也包含该点，两者必然相交——所以分段不会漏命中。
+            # 被 max_dist 截断过的短射线，再分段纯属浪费
+            ns = 1 if L < tri_side * 8 else k_splits
+            ts = np.arange(ns + 1) * (L / ns)
+            pts = o + dv * ts[:, None]
+            blo = np.minimum(pts[:-1], pts[1:])
+            bhi = np.maximum(pts[:-1], pts[1:])
+            got: list[np.ndarray] = []
+            for s in range(ns):
+                box = (blo[s, 0], blo[s, 1], blo[s, 2], bhi[s, 0], bhi[s, 1], bhi[s, 2])
+                c = np.fromiter(idx.intersection(box), dtype=np.int64, count=-1)
+                if c.size:
+                    got.append(c)
+            if not got:
+                continue
+            cand = got[0] if len(got) == 1 else np.unique(np.concatenate(got))
+            parts_t.append(cand)
+            parts_r.append(np.full(cand.size, k, dtype=np.int64))
+        if not parts_t:
             continue
-        t = _mt_batch(o, d, tri[cand])
-        t = t[(t > eps) & (t <= span)]
-        if len(t):
-            out[k] = float(t.min())
+        tall = np.concatenate(parts_t)
+        rall = np.concatenate(parts_r)
+        t = _mt_pairs(origins[rall], dirs[rall], tri[tall])
+        t = np.where((t > eps) & (t <= span), t, np.inf)
+        # rall 是按射线号升序拼出来的，可以直接分段归约，比 np.minimum.at 快得多
+        first = np.flatnonzero(np.r_[True, rall[1:] != rall[:-1]])
+        sel = rall[first]
+        out[sel] = np.minimum(out[sel], np.minimum.reduceat(t, first))
     return out
 
 
@@ -283,12 +594,16 @@ def sample_wall_thickness(mesh, sample_n: int = 6000, multi_dir: int = 3,
         for d in dirs:
             dist = _raycast_nearest(verts, faces, origins, d, eps * 10, max_dist)
             thick = np.minimum(thick, dist)
-    except Exception:
-        from scipy.spatial import cKDTree
-
-        tree = cKDTree(verts)
-        d2, _ = tree.query(centers, k=2)
-        thick = d2[:, 1] * 2.0
+    except Exception as exc:
+        # 旧兜底用 KDTree 最近顶点距离 ×2 冒充壁厚：最近的顶点通常在同一个面上，
+        # 量出来接近 0，会让健康模型误报薄壁；反过来也可能漏掉真正的薄点。
+        # 这里不再编造数值，明确标记 degraded，由上层给「无法可靠测量」而不是「安全」。
+        return {
+            "samples": 0, "min": None, "median": None, "p5": None,
+            "thin_ratio": None, "fail_ratio": None, "directions": len(dirs),
+            "degraded": True, "method": "raycast",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
     ok = thick[np.isfinite(thick) & (thick > 0)]
     if len(ok) == 0:
         return {"samples": 0, "min": None, "median": None, "p5": None, "thin_ratio": 0.0}
@@ -386,40 +701,67 @@ def _item(id_, name, severity, message, value=None, fix=None, details=None) -> d
 def check_watertight(mesh, params, ctx=None) -> dict:
     verts, faces = np.asarray(mesh.vertices), np.asarray(mesh.faces)
     h = edge_histogram(faces, len(verts))
-    if h["boundary"] == 0 and h["nonmanifold"] == 0:
+    dup = duplicate_face_count(faces)
+    if h["boundary"] == 0 and h["nonmanifold"] == 0 and dup == 0:
         return _item("watertight", "水密性", "ok", "所有边都被恰好两个面共享，模型闭合，可直接布尔运算与切片。",
                      {"boundary_edges": 0})
-    sev = "error" if h["boundary"] > 0 else "warning"
+    if h["boundary"] > 0:
+        msg = f"存在 {h['boundary']} 条开放边，模型不闭合。切片软件无法判断内外，可能打出空壳或直接报错。"
+        if h["nonmanifold"]:
+            msg += f" 另有 {h['nonmanifold']} 条非流形边。"
+    elif h["nonmanifold"] > 0:
+        msg = (f"没有开放边，但有 {h['nonmanifold']} 条边被 3 个及以上面共享。"
+               f"模型看似闭合，实际是重叠面/非流形拓扑，切片和布尔运算会在这里产生歧义。")
+    else:
+        msg = f"检测到 {dup} 个重复面（同一组顶点被多次使用）。模型看似闭合，实际有两层重合的皮。"
     return _item(
-        "watertight", "水密性", sev,
-        f"存在 {h['boundary']} 条开放边，模型不闭合。切片软件无法判断内外，可能打出空壳或直接报错。",
-        {"boundary_edges": h["boundary"], "nonmanifold_edges": h["nonmanifold"]},
-        fix={"action": "fill_holes", "label": "一键补洞"},
+        "watertight", "水密性", "error", msg,
+        {"boundary_edges": h["boundary"], "nonmanifold_edges": h["nonmanifold"],
+         "duplicate_faces": dup},
+        fix={"action": "fill_holes", "label": "一键补洞并清理重叠面"},
     )
 
 
 def check_normals(mesh, params, ctx=None) -> dict:
-    verts, faces = np.asarray(mesh.vertices), np.asarray(mesh.faces)
+    """法线检测：逐连通体看有向体积，不能只看总和。
+
+    一个实体朝外、另一个整体朝内时，两者有向体积正负抵消，总和可能接近 0
+    甚至为正，旧逻辑会判「正常」。这类模型切片后其中一件会变成空腔。
+    """
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces)
     vol = signed_volume(verts, faces)
     areas = tri_areas(verts, faces)
     degenerate = int((areas < 1e-12).sum())
-    flipped = vol < 0
+    ext = float(max(np.ptp(verts, axis=0))) if len(verts) else 1.0
+    vol_tol = max(1e-9, ext ** 3 * 1e-9)
+    n_comp, _labels, vols = component_volumes(verts, faces)
+    inverted = [c for c in range(n_comp) if vols[c] < -vol_tol]
+    conflicts = winding_conflict_count(faces)
     msgs, sev, fixes = [], "ok", None
-    if flipped:
+    if inverted:
         sev = "error"
-        msgs.append("有向体积为负，整体法线朝内——切片软件会把实体当成空腔。")
-        fixes = {"action": "fix_normals", "label": "一键翻转法线"}
+        msgs.append(f"{len(inverted)} 个部件的法线整体朝内（有向体积为负）——切片软件会把它们当成空腔。")
+        fixes = {"action": "fix_normals", "label": "一键统一法线"}
+    if conflicts:
+        if sev == "ok":
+            sev = "error" if conflicts > max(3, len(faces) * 0.01) else "warning"
+        msgs.append(f"有 {conflicts} 条边两侧的面绕序相同，法线方向不一致。")
+        fixes = {"action": "fix_normals", "label": "一键统一法线"}
     if degenerate:
         if sev == "ok":
             sev = "warning"
         msgs.append(f"有 {degenerate} 个零面积退化面，会产生无效法线。")
+        fixes = fixes or {"action": "merge_vertices", "label": "清理退化面"}
     if not msgs:
         msgs.append("法线朝外且方向一致，有向体积为正。")
     return _item(
         "normals", "法线方向", sev, " ".join(msgs),
         {"signed_volume": round(vol, 3), "degenerate_faces": degenerate,
+         "components": int(n_comp), "inverted_components": len(inverted),
+         "winding_conflicts": int(conflicts),
          "winding_consistent": bool(getattr(mesh, "is_winding_consistent", False))},
-        fix=fixes or ({"action": "merge_vertices", "label": "清理退化面"} if degenerate else None),
+        fix=fixes,
     )
 
 
@@ -436,6 +778,10 @@ def check_thickness(mesh, params, ctx=None) -> dict:
     # 粗筛只需要回答「有没有比告警线两倍更薄的地方」，所以射线直接截断到该距离。
     # 截断后每条射线的候选三角形骤减，32 万面模型从 15.8s 降到 0.6s。
     quick = sample_wall_thickness(mesh, min(600, n), multi_dir=1, max_dist=limit)
+    if quick.get("degraded"):
+        return _item("thickness", "壁厚", "info",
+                     f"壁厚检测降级：射线求交失败（{quick.get('error')}），无法给出可靠厚度。"
+                     "请先修复网格缺陷再复检。", quick)
     if quick["samples"] == 0:
         quick["mode"] = "coarse"
         quick["min"] = round(limit, 2)
@@ -447,11 +793,29 @@ def check_thickness(mesh, params, ctx=None) -> dict:
     # 全量阶段同样截断：超过 2mm 都算安全，没必要扫穿整个模型
     res = sample_wall_thickness(mesh, n, multi_dir=3, max_dist=max(2.0, th.wall_warn * 2.5))
     res["mode"] = "full"
+    if res.get("degraded"):
+        return _item("thickness", "壁厚", "info",
+                     f"壁厚全量检测降级：射线求交失败（{res.get('error')}），无法给出可靠厚度。"
+                     "请先修复网格缺陷再复检。", res)
     if res["samples"] == 0:
-        # 射线全被截断，说明整件都比截断距离还厚，用粗筛结论即可
-        quick["mode"] = "coarse"
+        # 全量采样一条射线都没命中，但粗筛可能已经量到薄点。旧逻辑无条件判 ok，
+        # 会把「粗筛 600 面里 0.3mm」的薄壁直接放过。以粗筛实测值为准，并标注来源。
+        quick["mode"] = "coarse_confirm"
+        mn_q = quick.get("min")
+        if mn_q is not None and not quick.get("lower_bound"):
+            quick["lower_bound"] = False
+            if mn_q < th.wall_fail:
+                return _item("thickness", "壁厚", "error",
+                             f"全量采样未命中，但粗筛测得最薄 {mn_q:.2f}mm（600 面），低于 {th.wall_fail}mm 打印下限。",
+                             quick, fix={"action": "thicken", "label": "一键加厚到安全值"})
+            if mn_q < th.wall_warn:
+                return _item("thickness", "壁厚", "warning",
+                             f"全量采样未命中，但粗筛测得最薄 {mn_q:.2f}mm（600 面），偏薄。",
+                             quick, fix={"action": "thicken", "label": "一键加厚到安全值"})
+        # 粗筛也没命中：只能确定「采样范围内没有低于截断距离的薄壁」
+        quick["lower_bound"] = True
         return _item("thickness", "壁厚", "ok",
-                     f"最薄 {quick['min']:.2f}mm，整件厚度都在截断距离以外，未发现薄壁。",
+                     f"最薄不小于 {limit:.1f}mm（粗筛 600 面未发现更薄处），整件厚度安全，未做全量扫描。",
                      quick)
     mn = res["min"]
     if mn < th.wall_fail:
@@ -467,13 +831,19 @@ def check_thickness(mesh, params, ctx=None) -> dict:
 def check_nonmanifold(mesh, params, ctx=None) -> dict:
     verts, faces = np.asarray(mesh.vertices), np.asarray(mesh.faces)
     h = edge_histogram(faces, len(verts))
-    if h["nonmanifold"] == 0:
+    dup = duplicate_face_count(faces)
+    if h["nonmanifold"] == 0 and dup == 0:
         return _item("nonmanifold", "非流形边", "ok", "没有一条边被超过两个面共享。", {"count": 0})
+    parts = []
+    if h["nonmanifold"]:
+        parts.append(f"{h['nonmanifold']} 条边被 3 个及以上面共享")
+    if dup:
+        parts.append(f"{dup} 个面与其它面顶点完全相同（重复面）")
     return _item(
-        "nonmanifold", "非流形边", "warning",
-        f"{h['nonmanifold']} 条边被 3 个及以上面共享。布尔运算和切片可能在这里产生歧义，常见于两块面片叠在一起。",
-        {"count": h["nonmanifold"]},
-        fix={"action": "merge_vertices", "label": "合并顶点消解"},
+        "nonmanifold", "非流形边", "error",
+        "；".join(parts) + "。布尔运算和切片会在这里产生歧义，常见于两块面片叠在一起或被复制了一遍。",
+        {"count": h["nonmanifold"], "duplicate_faces": dup},
+        fix={"action": "fill_holes", "label": "清理非流形与重复面"},
     )
 
 
@@ -496,23 +866,32 @@ def check_self_intersection(mesh, params, ctx=None) -> dict:
 
 
 def check_components(mesh, params, ctx=None) -> dict:
-    verts, faces = np.asarray(mesh.vertices), np.asarray(mesh.faces)
-    n, labels = union_components(faces, len(verts))
+    """连通分量检测。碎屑阈值按「面积占比」而不是把 mm³ 当 mm² 用。
+
+    旧实现拿 `tiny_volume`（mm³）直接和三角形面积和（mm²）比，量纲不一致：
+    一个 0.5mm³ 的碎屑只要是 1mm² 的薄片就会被判正常，而一个 3mm² 的小零件
+    反而可能被当成碎屑。这里改为与主部件面积占比，并保留体积做辅助判据。
+    """
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces)
+    info = classify_components(verts, faces, float(params.get("small_ratio", 0.01)))
+    n = info["components"]
     if n <= 1:
         return _item("components", "孤立面片", "ok", "模型是单一连通体。", {"components": n})
-    areas = tri_areas(verts, faces)
-    sizes = []
-    for c in range(n):
-        m = labels == c
-        sizes.append({"faces": int(m.sum()), "area": float(areas[m].sum())})
-    sizes.sort(key=lambda x: -x["area"])
-    tiny = [s for s in sizes if s["area"] < config.get().thresholds.tiny_volume]
+    sizes = info["sizes"]
+    total_area = max(1e-9, sum(s["area"] for s in sizes))
+    tiny = info["tiny"]
+    cavities = info["cavities"]
     sev = "warning" if tiny else "info"
-    msg = f"模型由 {n} 个互不连通的部件组成，最大部件占 {sizes[0]['area'] / max(1e-9, sum(s['area'] for s in sizes)) * 100:.1f}% 表面积。"
+    msg = (f"模型由 {n} 个互不连通的部件组成，最大部件占 "
+           f"{sizes[0]['area'] / total_area * 100:.1f}% 表面积。")
+    if cavities:
+        msg += f" 其中 {cavities} 个是实体内部的内腔，不会被当成碎屑。"
     if tiny:
-        msg += f" 其中 {len(tiny)} 个是碎屑（体积过小），建议清理。"
+        msg += f" 其中 {tiny} 个是碎屑（面积不足主件 1%，或负体积但不在实体内），建议清理。"
+    clean_sizes = [{k: v for k, v in s.items()} for s in sizes[:8]]
     return _item("components", "孤立面片", sev, msg,
-                 {"components": n, "sizes": sizes[:8], "tiny": len(tiny)},
+                 {"components": n, "sizes": clean_sizes, "tiny": tiny, "cavities": cavities},
                  fix={"action": "remove_small", "label": "移除碎屑"} if tiny else None)
 
 
@@ -634,14 +1013,30 @@ def quality_score(report: dict) -> dict:
                       "max": full, "note": note})
 
     it = items.get("watertight") or {}
-    b = int((it.get("value") or {}).get("boundary_edges") or 0)
-    add("水密性", 25 if b == 0 else max(0, 25 - min(25, b * 2)), 25, f"开放边 {b}")
+    v = it.get("value") or {}
+    b = int(v.get("boundary_edges") or 0)
+    nm = int(v.get("nonmanifold_edges") or 0)
+    dup = int(v.get("duplicate_faces") or 0)
+    add("水密性", 25 if (b == 0 and nm == 0 and dup == 0) else max(0, 25 - min(25, b * 2 + nm * 3 + dup * 3)),
+        25, f"开放边 {b}，非流形 {nm}，重复面 {dup}")
 
     it = items.get("normals") or {}
-    vol = float((it.get("value") or {}).get("signed_volume") or 0)
-    deg = int((it.get("value") or {}).get("degenerate_faces") or 0)
-    n_score = 15 if vol > 0 and deg == 0 else (8 if vol > 0 else 0)
-    add("法线", n_score, 15, f"有向体积 {vol:.0f}，退化面 {deg}")
+    v = it.get("value") or {}
+    vol = float(v.get("signed_volume") or 0)
+    deg = int(v.get("degenerate_faces") or 0)
+    inv = int(v.get("inverted_components") or 0)
+    wc = int(v.get("winding_conflicts") or 0)
+    n_score = 15.0
+    if inv:
+        n_score -= min(12, 6 * inv)
+    if wc:
+        n_score -= min(8, 2 + wc * 0.5)
+    if vol <= 0:
+        n_score -= 3
+    if deg:
+        n_score -= min(3, deg * 0.5)
+    add("法线", max(0.0, n_score), 15,
+        f"朝内部件 {inv}，绕序冲突 {wc}，退化面 {deg}")
 
     it = items.get("thickness") or {}
     v = it.get("value") or {}
@@ -649,6 +1044,9 @@ def quality_score(report: dict) -> dict:
     if mn is None:
         t_score = 12.0
         note = "未测出"
+    elif v.get("lower_bound"):
+        t_score = 20.0
+        note = f"最薄 ≥ {float(mn):.2f}mm（下限）"
     else:
         mn = float(mn)
         t_score = 20 if mn >= 1.5 else 14 if mn >= 0.8 else 7 if mn >= 0.4 else 0
@@ -656,8 +1054,10 @@ def quality_score(report: dict) -> dict:
     add("壁厚", t_score, 20, note)
 
     it = items.get("nonmanifold") or {}
-    c = int((it.get("value") or {}).get("count") or 0)
-    add("流形性", 15 if c == 0 else max(0, 15 - min(15, c)), 15, f"非流形边 {c}")
+    v = it.get("value") or {}
+    c = int(v.get("count") or 0)
+    dup = int(v.get("duplicate_faces") or 0)
+    add("流形性", max(0, 15 - min(15, c + dup * 3)), 15, f"非流形边 {c}，重复面 {dup}")
 
     it = items.get("self_intersection") or {}
     c = int((it.get("value") or {}).get("count") or 0)

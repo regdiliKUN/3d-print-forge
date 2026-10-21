@@ -13,10 +13,53 @@ import trimesh
 from skimage import measure
 
 
+MAX_AXIS_VOXELS = 256
+
+
 def choose_pitch(mesh, target_voxels: int = 120, floor: float = 0.2) -> float:
-    """按最长边切成 target_voxels 份，避免大模型把内存撑爆。"""
-    scale = float(max(mesh.extents)) if len(mesh.extents) else 1.0
-    return max(floor, scale / max(20, target_voxels))
+    """按最长边切成 target_voxels 份，避免大模型把内存撑爆。
+
+    旧实现固定 floor=0.2mm，0.5mm 的珠宝件会被切成 2~3 格，marching cubes
+    基本重建不出形状。floor 只应约束「大模型不要切太细」，不能大于模型本身
+    的尺度，所以这里按最长边再收一次。
+    """
+    ext = np.asarray(mesh.extents, dtype=np.float64) if mesh.extents is not None else np.zeros(0)
+    scale = float(np.max(ext)) if ext.size else 0.0
+    if not np.isfinite(scale) or scale <= 0:
+        return max(float(floor), 1e-6)
+    floor = min(float(floor), scale / 20.0)
+    return max(floor, scale / max(20, int(target_voxels)))
+
+
+def sanitize_pitch(mesh, pitch: float | None = None, max_axis: int = MAX_AXIS_VOXELS) -> float:
+    """把外部传入的 pitch 收敛到可栅格化的范围。
+
+    API 参数没有可信来源：0、负数、NaN、1e-9 都可能出现。过小的 pitch 会让
+    grid 维度爆炸（1000mm 模型用 0.01mm 就是 100k³），过大的 pitch 又会让
+    模型不足一个体素、重建为空。这里同时做上下界，并返回实际生效的 pitch。
+    """
+    ext = np.asarray(mesh.extents, dtype=np.float64) if mesh.extents is not None else np.zeros(0)
+    scale = float(np.max(ext)) if ext.size else 0.0
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError("模型包围盒为空，无法体素化")
+    if pitch is None:
+        p = choose_pitch(mesh)
+    else:
+        try:
+            p = float(pitch)
+        except (TypeError, ValueError):
+            p = choose_pitch(mesh)
+        if not np.isfinite(p) or p <= 0:
+            p = choose_pitch(mesh)
+    # 每个轴最多 max_axis 格，防止 pitch 过小把内存打爆
+    lower = scale / float(max(1, int(max_axis)))
+    # 最长边至少 8 格；最薄的非零边至少 1 格，否则模型会整个消失
+    positive = ext[ext > max(scale * 1e-9, 1e-12)]
+    thinnest = float(np.min(positive)) if positive.size else scale
+    upper = min(scale / 8.0, thinnest)
+    # 极薄片在 256 格上限内本来就无法保留厚度：优先保证内存有界
+    p = max(min(p, upper), lower)
+    return float(p)
 
 
 def to_grid(mesh, pitch: float | None = None):
@@ -25,8 +68,11 @@ def to_grid(mesh, pitch: float | None = None):
     补边是必须的：当模型正好填满自己的包围盒（薄板、立方体都是），
     grid 会全为 True，marching cubes 找不到 0/1 交界面而直接报错。
     """
-    p = pitch or choose_pitch(mesh)
-    vox = mesh.voxelized(pitch=p).fill()
+    p = sanitize_pitch(mesh, pitch)
+    try:
+        vox = mesh.voxelized(pitch=p).fill()
+    except Exception as exc:
+        raise ValueError(f"体素化失败（pitch={p:.4g}mm）：{exc}") from exc
     grid = np.pad(np.asarray(vox.matrix, dtype=bool), 1, constant_values=False)
     return grid, vox, float(vox.pitch[0])
 

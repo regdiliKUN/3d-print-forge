@@ -1,0 +1,1246 @@
+{
+ "tag": "diag1",
+ "when": "2026-10-22T03:38:44",
+ "python": "3.13.14",
+ "repeats": 3,
+ "models": {
+  "ball_20k": {
+   "model": "ball_20k",
+   "faces": 20480,
+   "stages": {
+    "load": {
+     "ms": [
+      20.62,
+      22.45,
+      20.61
+     ],
+     "median_ms": 20.62,
+     "min_ms": 20.61,
+     "max_ms": 22.45,
+     "prep_ms": 0.0,
+     "base_mb": 119.66,
+     "end_delta_mb": 0.25,
+     "fingerprint": {
+      "vertices": 10242.0,
+      "faces": 20480.0
+     },
+     "error": null,
+     "peak_mb": 122.25,
+     "peak_delta_mb": 2.59
+    },
+    "preview_payload": {
+     "ms": [
+      45.71,
+      41.57,
+      39.41
+     ],
+     "median_ms": 41.57,
+     "min_ms": 39.41,
+     "max_ms": 45.71,
+     "prep_ms": 0.0,
+     "base_mb": 120.34,
+     "end_delta_mb": 1.09,
+     "fingerprint": {
+      "vertex_count": 10242.0,
+      "face_count": 20480.0,
+      "b64_chars": 491552.0,
+      "raw_bytes": 368664.0
+     },
+     "error": null,
+     "peak_mb": 122.59,
+     "peak_delta_mb": 2.25
+    },
+    "analyze": {
+     "ms": [
+      266.42,
+      258.55,
+      261.52
+     ],
+     "median_ms": 261.52,
+     "min_ms": 258.55,
+     "max_ms": 266.42,
+     "prep_ms": 43.75,
+     "base_mb": 123.13,
+     "end_delta_mb": 7.05,
+     "fingerprint": {
+      "quality": 100.0,
+      "grade": "A",
+      "items.watertight.sev": "ok",
+      "items.watertight.val.boundary_edges": 0.0,
+      "items.normals.sev": "ok",
+      "items.normals.val.signed_volume": 113036.0,
+      "items.normals.val.degenerate_faces": 0.0,
+      "items.normals.val.components": 1.0,
+      "items.normals.val.inverted_components": 0.0,
+      "items.normals.val.winding_conflicts": 0.0,
+      "items.normals.val.winding_consistent": true,
+      "items.thickness.sev": "ok",
+      "items.thickness.val.samples": 0.0,
+      "items.thickness.val.min": 1.6,
+      "items.thickness.val.thin_ratio": 0.0,
+      "items.thickness.val.mode": "coarse",
+      "items.thickness.val.lower_bound": true,
+      "items.nonmanifold.sev": "ok",
+      "items.nonmanifold.val.count": 0.0,
+      "items.self_intersection.sev": "ok",
+      "items.self_intersection.val.count": 0.0,
+      "items.self_intersection.val.duplicates": 0.0,
+      "items.self_intersection.val.coplanar_overlaps": 0.0,
+      "items.self_intersection.val.sampled": false,
+      "items.self_intersection.val.candidate_pairs": 128850.0,
+      "items.self_intersection.val.tested_pairs": 92274.0,
+      "items.self_intersection.val.tolerance": 6e-05,
+      "items.components.sev": "ok",
+      "items.components.val.components": 1.0,
+      "items.units.sev": "ok",
+      "items.units.val.unit": "mm",
+      "items.units.val.max_dim": 60.0,
+      "items.units.val.scale": 1.0,
+      "items.units.val.message": "最大尺寸 60.0mm，在绝大多数桌面机成型范围内，无需换算。"
+     },
+     "error": null,
+     "peak_mb": 208.16,
+     "peak_delta_mb": 85.03
+    },
+    "thick_field": {
+     "ms": [
+      4147.11,
+      3970.85,
+      3960.14
+     ],
+     "median_ms": 3970.85,
+     "min_ms": 3960.14,
+     "max_ms": 4147.11,
+     "prep_ms": 46.9,
+     "base_mb": 128.96,
+     "end_delta_mb": 1.03,
+     "fingerprint": {
+      "n": 10242.0,
+      "min": 59.983,
+      "p5": 59.983,
+      "max": 59.986,
+      "mean": 59.9853
+     },
+     "error": null,
+     "peak_mb": 137.5,
+     "peak_delta_mb": 8.54
+    },
+    "overhang_field": {
+     "ms": [
+      6.94,
+      6.62,
+      6.5
+     ],
+     "median_ms": 6.62,
+     "min_ms": 6.5,
+     "max_ms": 6.94,
+     "prep_ms": 37.15,
+     "base_mb": 129.4,
+     "end_delta_mb": 3.41,
+     "fingerprint": {
+      "n": 10242.0,
+      "min": 10.4,
+      "max": 180.0,
+      "mean": 89.8694
+     },
+     "error": null,
+     "peak_mb": 132.81,
+     "peak_delta_mb": 3.41
+    },
+    "comp_field": {
+     "ms": [
+      29.11,
+      29.52,
+      30.49
+     ],
+     "median_ms": 29.52,
+     "min_ms": 29.11,
+     "max_ms": 30.49,
+     "prep_ms": 37.4,
+     "base_mb": 129.43,
+     "end_delta_mb": 2.48,
+     "fingerprint": {
+      "components": 1.0,
+      "sizes[0]": 11306.4
+     },
+     "error": null,
+     "peak_mb": 134.12,
+     "peak_delta_mb": 4.69
+    },
+    "section_profile": {
+     "ms": [
+      84.32,
+      97.27,
+      86.92
+     ],
+     "median_ms": 86.92,
+     "min_ms": 84.32,
+     "max_ms": 97.27,
+     "prep_ms": 42.42,
+     "base_mb": 130.64,
+     "end_delta_mb": 0.88,
+     "fingerprint": {
+      "ok": true,
+      "samples": 40.0,
+      "zs.len": 40,
+      "areas.len": 40,
+      "perimeters.len": 40,
+      "max_area_mm2": 2824.6,
+      "volume_integral_mm3": 112864.0,
+      "perimeter_integral_mm2": 8841.8,
+      "correction": 1.002
+     },
+     "error": null,
+     "peak_mb": 136.31,
+     "peak_delta_mb": 5.67
+    },
+    "build_supports": {
+     "ms": [
+      101.94,
+      98.44,
+      96.13
+     ],
+     "median_ms": 98.44,
+     "min_ms": 96.13,
+     "max_ms": 101.94,
+     "prep_ms": 42.98,
+     "base_mb": 130.43,
+     "end_delta_mb": 5.17,
+     "fingerprint": {
+      "count": 119.0,
+      "segments": 119.0,
+      "faces": 4760.0,
+      "note": ""
+     },
+     "error": null,
+     "peak_mb": 138.13,
+     "peak_delta_mb": 7.7
+    },
+    "support_density": {
+     "ms": [
+      129.16,
+      136.35,
+      134.21
+     ],
+     "median_ms": 134.21,
+     "min_ms": 129.16,
+     "max_ms": 136.35,
+     "prep_ms": 46.55,
+     "base_mb": 129.46,
+     "end_delta_mb": 6.43,
+     "fingerprint": {
+      "count": 119.0,
+      "max": 16.0,
+      "n": 10242.0,
+      "mean": 2.93068,
+      "sum": 30016.0
+     },
+     "error": null,
+     "peak_mb": 137.75,
+     "peak_delta_mb": 8.29
+    },
+    "hollow": {
+     "ms": [
+      1166.15,
+      1022.13,
+      996.6
+     ],
+     "median_ms": 1022.13,
+     "min_ms": 996.6,
+     "max_ms": 1166.15,
+     "prep_ms": 42.71,
+     "base_mb": 129.87,
+     "end_delta_mb": 13.43,
+     "fingerprint": {
+      "shell_faces": 51016.0,
+      "cavity_faces": 30536.0,
+      "shell_volume": 16245.7,
+      "cavity_volume": 96790.5
+     },
+     "error": null,
+     "peak_mb": 554.14,
+     "peak_delta_mb": 424.27
+    },
+    "cavity": {
+     "ms": [
+      960.99,
+      995.3,
+      946.86
+     ],
+     "median_ms": 960.99,
+     "min_ms": 946.86,
+     "max_ms": 995.3,
+     "prep_ms": 43.86,
+     "base_mb": 129.89,
+     "end_delta_mb": 5.47,
+     "fingerprint": {
+      "volume": 96677.1
+     },
+     "error": null,
+     "peak_mb": 555.44,
+     "peak_delta_mb": 425.55
+    },
+    "export_stl": {
+     "ms": [
+      4.45,
+      4.32,
+      3.93
+     ],
+     "median_ms": 4.32,
+     "min_ms": 3.93,
+     "max_ms": 4.45,
+     "prep_ms": 43.68,
+     "base_mb": 129.9,
+     "end_delta_mb": 5.33,
+     "fingerprint": {
+      "bytes": 1024080.0
+     },
+     "error": null,
+     "peak_mb": 136.75,
+     "peak_delta_mb": 6.85
+    },
+    "export_3mf": {
+     "ms": [
+      39.85,
+      41.02,
+      40.42
+     ],
+     "median_ms": 40.42,
+     "min_ms": 39.85,
+     "max_ms": 41.02,
+     "prep_ms": 43.95,
+     "base_mb": 131.14,
+     "end_delta_mb": 2.01,
+     "fingerprint": {
+      "bytes": 244025.0
+     },
+     "error": null,
+     "peak_mb": 132.89,
+     "peak_delta_mb": 1.75
+    },
+    "export_obj": {
+     "ms": [
+      22.03,
+      20.51,
+      20.74
+     ],
+     "median_ms": 20.74,
+     "min_ms": 20.51,
+     "max_ms": 22.03,
+     "prep_ms": 44.47,
+     "base_mb": 130.61,
+     "end_delta_mb": 5.82,
+     "fingerprint": {
+      "bytes": 737074.0
+     },
+     "error": null,
+     "peak_mb": 134.68,
+     "peak_delta_mb": 4.07
+    },
+    "export_ply": {
+     "ms": [
+      2.21,
+      1.48,
+      1.39
+     ],
+     "median_ms": 1.48,
+     "min_ms": 1.39,
+     "max_ms": 2.21,
+     "prep_ms": 42.85,
+     "base_mb": 131.32,
+     "end_delta_mb": 1.83,
+     "fingerprint": {
+      "bytes": 389363.0
+     },
+     "error": null,
+     "peak_mb": 131.51,
+     "peak_delta_mb": 0.19
+    }
+   }
+  },
+  "ball_82k": {
+   "model": "ball_82k",
+   "faces": 81920,
+   "stages": {
+    "load": {
+     "ms": [
+      88.23,
+      87.56,
+      82.99
+     ],
+     "median_ms": 87.56,
+     "min_ms": 82.99,
+     "max_ms": 88.23,
+     "prep_ms": 0.0,
+     "base_mb": 119.74,
+     "end_delta_mb": 2.87,
+     "fingerprint": {
+      "vertices": 40962.0,
+      "faces": 81920.0
+     },
+     "error": null,
+     "peak_mb": 134.76,
+     "peak_delta_mb": 15.02
+    },
+    "preview_payload": {
+     "ms": [
+      150.6,
+      137.43,
+      144.23
+     ],
+     "median_ms": 144.23,
+     "min_ms": 137.43,
+     "max_ms": 150.6,
+     "prep_ms": 0.0,
+     "base_mb": 141.43,
+     "end_delta_mb": 4.13,
+     "fingerprint": {
+      "vertex_count": 30002.0,
+      "face_count": 60000.0,
+      "b64_chars": 1440030.0,
+      "raw_bytes": 1080020.0
+     },
+     "error": null,
+     "peak_mb": 154.91,
+     "peak_delta_mb": 13.48
+    },
+    "analyze": {
+     "ms": [
+      962.33,
+      966.46,
+      942.9
+     ],
+     "median_ms": 962.33,
+     "min_ms": 942.9,
+     "max_ms": 966.46,
+     "prep_ms": 101.71,
+     "base_mb": 146.25,
+     "end_delta_mb": 29.13,
+     "fingerprint": {
+      "quality": 100.0,
+      "grade": "A",
+      "items.watertight.sev": "ok",
+      "items.watertight.val.boundary_edges": 0.0,
+      "items.normals.sev": "ok",
+      "items.normals.val.signed_volume": 113082.0,
+      "items.normals.val.degenerate_faces": 0.0,
+      "items.normals.val.components": 1.0,
+      "items.normals.val.inverted_components": 0.0,
+      "items.normals.val.winding_conflicts": 0.0,
+      "items.normals.val.winding_consistent": true,
+      "items.thickness.sev": "ok",
+      "items.thickness.val.samples": 0.0,
+      "items.thickness.val.min": 1.6,
+      "items.thickness.val.thin_ratio": 0.0,
+      "items.thickness.val.mode": "coarse",
+      "items.thickness.val.lower_bound": true,
+      "items.nonmanifold.sev": "ok",
+      "items.nonmanifold.val.count": 0.0,
+      "items.self_intersection.sev": "ok",
+      "items.self_intersection.val.count": 0.0,
+      "items.self_intersection.val.duplicates": 0.0,
+      "items.self_intersection.val.coplanar_overlaps": 0.0,
+      "items.self_intersection.val.sampled": true,
+      "items.self_intersection.val.candidate_pairs": 400000.0,
+      "items.self_intersection.val.tested_pairs": 285129.0,
+      "items.self_intersection.val.tolerance": 6e-05,
+      "items.components.sev": "ok",
+      "items.components.val.components": 1.0,
+      "items.units.sev": "ok",
+      "items.units.val.unit": "mm",
+      "items.units.val.max_dim": 60.0,
+      "items.units.val.scale": 1.0,
+      "items.units.val.message": "最大尺寸 60.0mm，在绝大多数桌面机成型范围内，无需换算。"
+     },
+     "error": null,
+     "peak_mb": 422.2,
+     "peak_delta_mb": 275.95
+    },
+    "thick_field": {
+     "ms": [
+      16162.9,
+      16598.28,
+      16422.67
+     ],
+     "median_ms": 16422.67,
+     "min_ms": 16162.9,
+     "max_ms": 16598.28,
+     "prep_ms": 107.04,
+     "base_mb": 166.58,
+     "end_delta_mb": 10.95,
+     "fingerprint": {
+      "n": 40962.0,
+      "min": 59.996,
+      "p5": 59.996,
+      "max": 59.997,
+      "mean": 59.9963
+     },
+     "error": null,
+     "peak_mb": 192.88,
+     "peak_delta_mb": 26.3
+    },
+    "support_density": {
+     "ms": [
+      406.85,
+      415.9,
+      407.51
+     ],
+     "median_ms": 407.51,
+     "min_ms": 406.85,
+     "max_ms": 415.9,
+     "prep_ms": 105.97,
+     "base_mb": 172.09,
+     "end_delta_mb": 12.05,
+     "fingerprint": {
+      "count": 118.0,
+      "max": 15.0,
+      "n": 40962.0,
+      "mean": 2.93062,
+      "sum": 120044.0
+     },
+     "error": null,
+     "peak_mb": 190.89,
+     "peak_delta_mb": 18.8
+    },
+    "hollow": {
+     "ms": [
+      1054.26,
+      1026.06,
+      1116.15
+     ],
+     "median_ms": 1054.26,
+     "min_ms": 1026.06,
+     "max_ms": 1116.15,
+     "prep_ms": 111.78,
+     "base_mb": 173.25,
+     "end_delta_mb": 14.67,
+     "fingerprint": {
+      "shell_faces": 112456.0,
+      "cavity_faces": 30536.0,
+      "shell_volume": 16267.5,
+      "cavity_volume": 96814.5
+     },
+     "error": null,
+     "peak_mb": 587.59,
+     "peak_delta_mb": 414.34
+    },
+    "export_stl": {
+     "ms": [
+      17.07,
+      16.35,
+      24.73
+     ],
+     "median_ms": 17.07,
+     "min_ms": 16.35,
+     "max_ms": 24.73,
+     "prep_ms": 115.48,
+     "base_mb": 171.2,
+     "end_delta_mb": 13.3,
+     "fingerprint": {
+      "bytes": 4096080.0
+     },
+     "error": null,
+     "peak_mb": 189.02,
+     "peak_delta_mb": 17.82
+    }
+   }
+  },
+  "plate_thin": {
+   "model": "plate_thin",
+   "faces": 3072,
+   "stages": {
+    "analyze": {
+     "ms": [
+      203.89,
+      203.24,
+      193.3
+     ],
+     "median_ms": 203.24,
+     "min_ms": 193.3,
+     "max_ms": 203.89,
+     "prep_ms": 26.96,
+     "base_mb": 122.28,
+     "end_delta_mb": 1.71,
+     "fingerprint": {
+      "quality": 80.0,
+      "grade": "B",
+      "items.watertight.sev": "ok",
+      "items.watertight.val.boundary_edges": 0.0,
+      "items.normals.sev": "ok",
+      "items.normals.val.signed_volume": 1260.0,
+      "items.normals.val.degenerate_faces": 0.0,
+      "items.normals.val.components": 1.0,
+      "items.normals.val.inverted_components": 0.0,
+      "items.normals.val.winding_conflicts": 0.0,
+      "items.normals.val.winding_consistent": true,
+      "items.thickness.sev": "error",
+      "items.thickness.val.samples": 483.0,
+      "items.thickness.val.min": 0.35,
+      "items.thickness.val.median": 0.35,
+      "items.thickness.val.p5": 0.35,
+      "items.thickness.val.max": 0.35,
+      "items.thickness.val.thin_ratio": 1.0,
+      "items.thickness.val.fail_ratio": 1.0,
+      "items.thickness.val.directions": 3.0,
+      "items.thickness.val.mode": "full",
+      "items.nonmanifold.sev": "ok",
+      "items.nonmanifold.val.count": 0.0,
+      "items.self_intersection.sev": "ok",
+      "items.self_intersection.val.count": 0.0,
+      "items.self_intersection.val.duplicates": 0.0,
+      "items.self_intersection.val.coplanar_overlaps": 0.0,
+      "items.self_intersection.val.sampled": false,
+      "items.self_intersection.val.candidate_pairs": 145110.0,
+      "items.self_intersection.val.tested_pairs": 21006.0,
+      "items.self_intersection.val.tolerance": 6e-05,
+      "items.components.sev": "ok",
+      "items.components.val.components": 1.0,
+      "items.units.sev": "ok",
+      "items.units.val.unit": "mm",
+      "items.units.val.max_dim": 60.0,
+      "items.units.val.scale": 1.0,
+      "items.units.val.message": "最大尺寸 60.0mm，在绝大多数桌面机成型范围内，无需换算。"
+     },
+     "error": null,
+     "peak_mb": 174.39,
+     "peak_delta_mb": 52.11
+    },
+    "thick_field": {
+     "ms": [
+      216.24,
+      226.05,
+      214.44
+     ],
+     "median_ms": 216.24,
+     "min_ms": 214.44,
+     "max_ms": 226.05,
+     "prep_ms": 25.5,
+     "base_mb": 122.98,
+     "end_delta_mb": 0.33,
+     "fingerprint": {
+      "n": 1538.0,
+      "min": 0.35,
+      "p5": 0.35,
+      "max": 60.0,
+      "mean": 37.5827
+     },
+     "error": null,
+     "peak_mb": 123.4,
+     "peak_delta_mb": 0.42
+    }
+   }
+  },
+  "broken_1k": {
+   "model": "broken_1k",
+   "faces": 1260,
+   "stages": {
+    "analyze": {
+     "ms": [
+      52.82,
+      56.74,
+      57.88
+     ],
+     "median_ms": 56.74,
+     "min_ms": 52.82,
+     "max_ms": 57.88,
+     "prep_ms": 21.7,
+     "base_mb": 121.15,
+     "end_delta_mb": 2.23,
+     "fingerprint": {
+      "quality": 63.0,
+      "grade": "C",
+      "items.watertight.sev": "error",
+      "items.watertight.val.boundary_edges": 96.0,
+      "items.watertight.val.nonmanifold_edges": 0.0,
+      "items.watertight.val.duplicate_faces": 0.0,
+      "items.normals.sev": "error",
+      "items.normals.val.signed_volume": -63261.0,
+      "items.normals.val.degenerate_faces": 0.0,
+      "items.normals.val.components": 2.0,
+      "items.normals.val.inverted_components": 1.0,
+      "items.normals.val.winding_conflicts": 0.0,
+      "items.normals.val.winding_consistent": true,
+      "items.thickness.sev": "ok",
+      "items.thickness.val.samples": 0.0,
+      "items.thickness.val.min": 1.6,
+      "items.thickness.val.thin_ratio": 0.0,
+      "items.thickness.val.mode": "coarse",
+      "items.thickness.val.lower_bound": true,
+      "items.nonmanifold.sev": "ok",
+      "items.nonmanifold.val.count": 0.0,
+      "items.self_intersection.sev": "ok",
+      "items.self_intersection.val.count": 0.0,
+      "items.self_intersection.val.duplicates": 0.0,
+      "items.self_intersection.val.coplanar_overlaps": 0.0,
+      "items.self_intersection.val.sampled": false,
+      "items.self_intersection.val.candidate_pairs": 7567.0,
+      "items.self_intersection.val.tested_pairs": 5485.0,
+      "items.self_intersection.val.tolerance": 8.65e-05,
+      "items.components.sev": "warning",
+      "items.components.val.components": 2.0,
+      "items.components.val.tiny": 1.0,
+      "items.components.val.cavities": 0.0,
+      "items.units.sev": "ok",
+      "items.units.val.unit": "mm",
+      "items.units.val.max_dim": 86.5,
+      "items.units.val.scale": 1.0,
+      "items.units.val.message": "最大尺寸 86.5mm，在绝大多数桌面机成型范围内，无需换算。"
+     },
+     "error": null,
+     "peak_mb": 126.71,
+     "peak_delta_mb": 5.56
+    },
+    "fill_holes": {
+     "ms": [
+      642.59,
+      11.71,
+      10.68
+     ],
+     "median_ms": 11.71,
+     "min_ms": 10.68,
+     "max_ms": 642.59,
+     "prep_ms": 20.79,
+     "base_mb": 451.91,
+     "end_delta_mb": 0.85,
+     "fingerprint": {
+      "method": "smooth",
+      "boundary_before": 96.0,
+      "boundary_after": 0.0,
+      "nonmanifold_after": 0.0,
+      "faces": 1292.0,
+      "vertices": 650.0
+     },
+     "error": null,
+     "peak_mb": 452.78,
+     "peak_delta_mb": 0.87
+    },
+    "fix_normals": {
+     "ms": [
+      7.23,
+      7.14,
+      7.43
+     ],
+     "median_ms": 7.23,
+     "min_ms": 7.14,
+     "max_ms": 7.43,
+     "prep_ms": 19.93,
+     "base_mb": 452.81,
+     "end_delta_mb": 0.0,
+     "fingerprint": {
+      "vol_before": -63261.0,
+      "vol_after": 63315.0,
+      "components": 2.0,
+      "flipped": 1.0,
+      "faces": 1260.0
+     },
+     "error": null,
+     "peak_mb": 452.81,
+     "peak_delta_mb": 0.0
+    }
+   }
+  },
+  "multi_5": {
+   "model": "multi_5",
+   "faces": 240,
+   "stages": {
+    "analyze": {
+     "ms": [
+      9.2,
+      9.72,
+      9.94
+     ],
+     "median_ms": 9.72,
+     "min_ms": 9.2,
+     "max_ms": 9.94,
+     "prep_ms": 22.39,
+     "base_mb": 122.61,
+     "end_delta_mb": 0.01,
+     "fingerprint": {
+      "quality": 90.0,
+      "grade": "A",
+      "items.watertight.sev": "ok",
+      "items.watertight.val.boundary_edges": 0.0,
+      "items.normals.sev": "ok",
+      "items.normals.val.signed_volume": 5000.0,
+      "items.normals.val.degenerate_faces": 0.0,
+      "items.normals.val.components": 5.0,
+      "items.normals.val.inverted_components": 0.0,
+      "items.normals.val.winding_conflicts": 0.0,
+      "items.normals.val.winding_consistent": true,
+      "items.thickness.sev": "ok",
+      "items.thickness.val.samples": 0.0,
+      "items.thickness.val.min": 1.6,
+      "items.thickness.val.thin_ratio": 0.0,
+      "items.thickness.val.mode": "coarse",
+      "items.thickness.val.lower_bound": true,
+      "items.nonmanifold.sev": "ok",
+      "items.nonmanifold.val.count": 0.0,
+      "items.self_intersection.sev": "ok",
+      "items.self_intersection.val.count": 0.0,
+      "items.self_intersection.val.duplicates": 0.0,
+      "items.self_intersection.val.coplanar_overlaps": 0.0,
+      "items.self_intersection.val.sampled": false,
+      "items.self_intersection.val.candidate_pairs": 2370.0,
+      "items.self_intersection.val.tested_pairs": 1410.0,
+      "items.self_intersection.val.tolerance": 9e-05,
+      "items.components.sev": "info",
+      "items.components.val.components": 5.0,
+      "items.components.val.tiny": 0.0,
+      "items.components.val.cavities": 0.0,
+      "items.units.sev": "ok",
+      "items.units.val.unit": "mm",
+      "items.units.val.max_dim": 90.0,
+      "items.units.val.scale": 1.0,
+      "items.units.val.message": "最大尺寸 90.0mm，在绝大多数桌面机成型范围内，无需换算。"
+     },
+     "error": null,
+     "peak_mb": 122.79,
+     "peak_delta_mb": 0.18
+    },
+    "comp_field": {
+     "ms": [
+      0.61,
+      0.79,
+      0.63
+     ],
+     "median_ms": 0.63,
+     "min_ms": 0.61,
+     "max_ms": 0.79,
+     "prep_ms": 23.29,
+     "base_mb": 122.63,
+     "end_delta_mb": 0.0,
+     "fingerprint": {
+      "components": 5.0,
+      "sizes[0]": 600.0,
+      "sizes[1]": 600.0,
+      "sizes[2]": 600.0,
+      "sizes[3]": 600.0,
+      "sizes[4]": 600.0
+     },
+     "error": null,
+     "peak_mb": 122.63,
+     "peak_delta_mb": 0.0
+    }
+   }
+  },
+  "xintersect": {
+   "model": "xintersect",
+   "faces": 2560,
+   "stages": {
+    "analyze": {
+     "ms": [
+      401.71,
+      375.51,
+      367.14
+     ],
+     "median_ms": 375.51,
+     "min_ms": 367.14,
+     "max_ms": 401.71,
+     "prep_ms": 25.84,
+     "base_mb": 123.25,
+     "end_delta_mb": 0.35,
+     "fingerprint": {
+      "quality": 67.0,
+      "grade": "C",
+      "items.watertight.sev": "ok",
+      "items.watertight.val.boundary_edges": 0.0,
+      "items.normals.sev": "ok",
+      "items.normals.val.signed_volume": 28031.0,
+      "items.normals.val.degenerate_faces": 0.0,
+      "items.normals.val.components": 2.0,
+      "items.normals.val.inverted_components": 0.0,
+      "items.normals.val.winding_conflicts": 0.0,
+      "items.normals.val.winding_consistent": true,
+      "items.thickness.sev": "error",
+      "items.thickness.val.samples": 52.0,
+      "items.thickness.val.min": 0.17,
+      "items.thickness.val.median": 0.997,
+      "items.thickness.val.p5": 0.176,
+      "items.thickness.val.max": 1.999,
+      "items.thickness.val.thin_ratio": 0.2885,
+      "items.thickness.val.fail_ratio": 0.1346,
+      "items.thickness.val.directions": 3.0,
+      "items.thickness.val.mode": "full",
+      "items.nonmanifold.sev": "ok",
+      "items.nonmanifold.val.count": 0.0,
+      "items.self_intersection.sev": "warning",
+      "items.self_intersection.val.count": 150.0,
+      "items.self_intersection.val.duplicates": 0.0,
+      "items.self_intersection.val.coplanar_overlaps": 0.0,
+      "items.self_intersection.val.sampled": false,
+      "items.self_intersection.val.candidate_pairs": 17952.0,
+      "items.self_intersection.val.tested_pairs": 12006.0,
+      "items.self_intersection.val.tolerance": 4e-05,
+      "items.components.sev": "info",
+      "items.components.val.components": 2.0,
+      "items.components.val.tiny": 0.0,
+      "items.components.val.cavities": 0.0,
+      "items.units.sev": "ok",
+      "items.units.val.unit": "mm",
+      "items.units.val.max_dim": 40.0,
+      "items.units.val.scale": 1.0,
+      "items.units.val.message": "最大尺寸 40.0mm，在绝大多数桌面机成型范围内，无需换算。"
+     },
+     "error": null,
+     "peak_mb": 133.48,
+     "peak_delta_mb": 10.23
+    }
+   }
+  },
+  "overhang_t": {
+   "model": "overhang_t",
+   "faces": 576,
+   "stages": {
+    "analyze": {
+     "ms": [
+      29.52,
+      27.61,
+      27.92
+     ],
+     "median_ms": 27.92,
+     "min_ms": 27.61,
+     "max_ms": 29.52,
+     "prep_ms": 23.58,
+     "base_mb": 121.02,
+     "end_delta_mb": 0.43,
+     "fingerprint": {
+      "quality": 90.0,
+      "grade": "A",
+      "items.watertight.sev": "ok",
+      "items.watertight.val.boundary_edges": 0.0,
+      "items.normals.sev": "ok",
+      "items.normals.val.signed_volume": 9820.0,
+      "items.normals.val.degenerate_faces": 0.0,
+      "items.normals.val.components": 1.0,
+      "items.normals.val.inverted_components": 0.0,
+      "items.normals.val.winding_conflicts": 0.0,
+      "items.normals.val.winding_consistent": true,
+      "items.thickness.sev": "ok",
+      "items.thickness.val.samples": 0.0,
+      "items.thickness.val.min": 1.6,
+      "items.thickness.val.thin_ratio": 0.0,
+      "items.thickness.val.mode": "coarse",
+      "items.thickness.val.lower_bound": true,
+      "items.nonmanifold.sev": "ok",
+      "items.nonmanifold.val.count": 0.0,
+      "items.self_intersection.sev": "warning",
+      "items.self_intersection.val.count": 112.0,
+      "items.self_intersection.val.duplicates": 0.0,
+      "items.self_intersection.val.coplanar_overlaps": 80.0,
+      "items.self_intersection.val.sampled": false,
+      "items.self_intersection.val.candidate_pairs": 34748.0,
+      "items.self_intersection.val.tested_pairs": 4350.0,
+      "items.self_intersection.val.tolerance": 4e-05,
+      "items.components.sev": "ok",
+      "items.components.val.components": 1.0,
+      "items.units.sev": "ok",
+      "items.units.val.unit": "mm",
+      "items.units.val.max_dim": 40.0,
+      "items.units.val.scale": 1.0,
+      "items.units.val.message": "最大尺寸 40.0mm，在绝大多数桌面机成型范围内，无需换算。"
+     },
+     "error": null,
+     "peak_mb": 129.18,
+     "peak_delta_mb": 8.16
+    },
+    "overhang_field": {
+     "ms": [
+      0.56,
+      0.38,
+      0.31
+     ],
+     "median_ms": 0.38,
+     "min_ms": 0.31,
+     "max_ms": 0.56,
+     "prep_ms": 23.94,
+     "base_mb": 121.54,
+     "end_delta_mb": 0.0,
+     "fingerprint": {
+      "n": 292.0,
+      "min": 0.0,
+      "max": 180.0,
+      "mean": 85.0685
+     },
+     "error": null,
+     "peak_mb": 121.54,
+     "peak_delta_mb": 0.0
+    },
+    "build_supports": {
+     "ms": [
+      45.32,
+      47.6,
+      41.56
+     ],
+     "median_ms": 45.32,
+     "min_ms": 41.56,
+     "max_ms": 47.6,
+     "prep_ms": 24.16,
+     "base_mb": 122.76,
+     "end_delta_mb": 0.15,
+     "fingerprint": {
+      "count": 125.0,
+      "segments": 125.0,
+      "faces": 5000.0,
+      "note": ""
+     },
+     "error": null,
+     "peak_mb": 122.91,
+     "peak_delta_mb": 0.15
+    },
+    "support_density": {
+     "ms": [
+      43.92,
+      39.99,
+      43.78
+     ],
+     "median_ms": 43.78,
+     "min_ms": 39.99,
+     "max_ms": 43.92,
+     "prep_ms": 21.68,
+     "base_mb": 123.05,
+     "end_delta_mb": 0.01,
+     "fingerprint": {
+      "count": 125.0,
+      "max": 15.0,
+      "n": 292.0,
+      "mean": 7.99658,
+      "sum": 2335.0
+     },
+     "error": null,
+     "peak_mb": 123.06,
+     "peak_delta_mb": 0.01
+    }
+   }
+  },
+  "inch_254": {
+   "model": "inch_254",
+   "faces": 12,
+   "stages": {
+    "analyze": {
+     "ms": [
+      4.68,
+      3.6,
+      3.77
+     ],
+     "median_ms": 3.77,
+     "min_ms": 3.6,
+     "max_ms": 4.68,
+     "prep_ms": 21.99,
+     "base_mb": 120.58,
+     "end_delta_mb": 0.0,
+     "fingerprint": {
+      "quality": 98.0,
+      "grade": "A",
+      "items.watertight.sev": "ok",
+      "items.watertight.val.boundary_edges": 0.0,
+      "items.normals.sev": "ok",
+      "items.normals.val.signed_volume": 2540000.0,
+      "items.normals.val.degenerate_faces": 0.0,
+      "items.normals.val.components": 1.0,
+      "items.normals.val.inverted_components": 0.0,
+      "items.normals.val.winding_conflicts": 0.0,
+      "items.normals.val.winding_consistent": true,
+      "items.thickness.sev": "ok",
+      "items.thickness.val.samples": 0.0,
+      "items.thickness.val.min": 1.6,
+      "items.thickness.val.thin_ratio": 0.0,
+      "items.thickness.val.mode": "coarse",
+      "items.thickness.val.lower_bound": true,
+      "items.nonmanifold.sev": "ok",
+      "items.nonmanifold.val.count": 0.0,
+      "items.self_intersection.sev": "ok",
+      "items.self_intersection.val.count": 0.0,
+      "items.self_intersection.val.duplicates": 0.0,
+      "items.self_intersection.val.coplanar_overlaps": 0.0,
+      "items.self_intersection.val.sampled": false,
+      "items.self_intersection.val.candidate_pairs": 6.0,
+      "items.self_intersection.val.tested_pairs": 0.0,
+      "items.self_intersection.val.tolerance": 0.000254,
+      "items.components.sev": "ok",
+      "items.components.val.components": 1.0,
+      "items.units.sev": "info",
+      "items.units.val.unit": "mm?",
+      "items.units.val.max_dim": 254.0,
+      "items.units.val.scale": 1.0,
+      "items.units.val.message": "最大尺寸 254.0mm，恰好等于 10 英寸（10.00）。数值本身是毫米无需换算，但如果原模型是按英寸设计的等比件，实际尺寸应为 6452mm。"
+     },
+     "error": null,
+     "peak_mb": 120.71,
+     "peak_delta_mb": 0.13
+    }
+   }
+  },
+  "statue_30k": {
+   "model": "statue_30k",
+   "faces": 20480,
+   "stages": {
+    "hollow": {
+     "ms": [
+      426.39,
+      440.35,
+      420.34
+     ],
+     "median_ms": 426.39,
+     "min_ms": 420.34,
+     "max_ms": 440.35,
+     "prep_ms": 38.11,
+     "base_mb": 121.98,
+     "end_delta_mb": 7.4,
+     "fingerprint": {
+      "shell_faces": 29888.0,
+      "cavity_faces": 9408.0,
+      "shell_volume": 9873.34,
+      "cavity_volume": 46644.8
+     },
+     "error": null,
+     "peak_mb": 293.2,
+     "peak_delta_mb": 171.22
+    },
+    "cavity": {
+     "ms": [
+      414.53,
+      430.6,
+      407.48
+     ],
+     "median_ms": 414.53,
+     "min_ms": 407.48,
+     "max_ms": 430.6,
+     "prep_ms": 43.08,
+     "base_mb": 122.17,
+     "end_delta_mb": -1.3,
+     "fingerprint": {
+      "volume": 46925.6
+     },
+     "error": null,
+     "peak_mb": 295.12,
+     "peak_delta_mb": 172.95
+    },
+    "export_stl": {
+     "ms": [
+      4.09,
+      4.05,
+      3.6
+     ],
+     "median_ms": 4.05,
+     "min_ms": 3.6,
+     "max_ms": 4.09,
+     "prep_ms": 43.39,
+     "base_mb": 122.7,
+     "end_delta_mb": 6.14,
+     "fingerprint": {
+      "bytes": 1024080.0
+     },
+     "error": null,
+     "peak_mb": 123.76,
+     "peak_delta_mb": 1.06
+    },
+    "export_3mf": {
+     "ms": [
+      42.5,
+      41.48,
+      43.15
+     ],
+     "median_ms": 42.5,
+     "min_ms": 41.48,
+     "max_ms": 43.15,
+     "prep_ms": 41.32,
+     "base_mb": 123.34,
+     "end_delta_mb": 0.98,
+     "fingerprint": {
+      "bytes": 272145.0
+     },
+     "error": null,
+     "peak_mb": 124.31,
+     "peak_delta_mb": 0.97
+    }
+   }
+  },
+  "degenerate": {
+   "model": "degenerate",
+   "faces": 3,
+   "stages": {
+    "analyze": {
+     "ms": [
+      5.87,
+      2.81,
+      3.1
+     ],
+     "median_ms": 3.1,
+     "min_ms": 2.81,
+     "max_ms": 5.87,
+     "prep_ms": 17.5,
+     "base_mb": 120.48,
+     "end_delta_mb": 0.07,
+     "fingerprint": {
+      "quality": 88.5,
+      "grade": "B",
+      "items.watertight.sev": "error",
+      "items.watertight.val.boundary_edges": 4.0,
+      "items.watertight.val.nonmanifold_edges": 0.0,
+      "items.watertight.val.duplicate_faces": 0.0,
+      "items.normals.sev": "warning",
+      "items.normals.val.signed_volume": 0.0,
+      "items.normals.val.degenerate_faces": 1.0,
+      "items.normals.val.components": 1.0,
+      "items.normals.val.inverted_components": 0.0,
+      "items.normals.val.winding_conflicts": 0.0,
+      "items.normals.val.winding_consistent": true,
+      "items.thickness.sev": "ok",
+      "items.thickness.val.samples": 0.0,
+      "items.thickness.val.min": 1.6,
+      "items.thickness.val.thin_ratio": 0.0,
+      "items.thickness.val.mode": "coarse",
+      "items.thickness.val.lower_bound": true,
+      "items.nonmanifold.sev": "ok",
+      "items.nonmanifold.val.count": 0.0,
+      "items.self_intersection.sev": "ok",
+      "items.self_intersection.val.count": 0.0,
+      "items.self_intersection.val.duplicates": 0.0,
+      "items.self_intersection.val.coplanar_overlaps": 0.0,
+      "items.self_intersection.val.sampled": false,
+      "items.self_intersection.val.candidate_pairs": 1.0,
+      "items.self_intersection.val.tested_pairs": 0.0,
+      "items.self_intersection.val.tolerance": 2e-06,
+      "items.components.sev": "ok",
+      "items.components.val.components": 1.0,
+      "items.units.sev": "ok",
+      "items.units.val.unit": "mm",
+      "items.units.val.max_dim": 2.0,
+      "items.units.val.scale": 1.0,
+      "items.units.val.message": "最大尺寸 2.0mm，在绝大多数桌面机成型范围内，无需换算。"
+     },
+     "error": null,
+     "peak_mb": 120.55,
+     "peak_delta_mb": 0.07
+    }
+   }
+  },
+  "ascii_20k": {
+   "model": "ascii_20k",
+   "faces": 20480,
+   "stages": {
+    "load": {
+     "ms": [
+      75.11,
+      74.64,
+      73.76
+     ],
+     "median_ms": 74.64,
+     "min_ms": 73.76,
+     "max_ms": 75.11,
+     "prep_ms": 0.0,
+     "base_mb": 121.28,
+     "end_delta_mb": 2.15,
+     "fingerprint": {
+      "vertices": 10242.0,
+      "faces": 20480.0
+     },
+     "error": null,
+     "peak_mb": 143.3,
+     "peak_delta_mb": 22.02
+    }
+   }
+  }
+ },
+ "wall_s": 141.5
+}

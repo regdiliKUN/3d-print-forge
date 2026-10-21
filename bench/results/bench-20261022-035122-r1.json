@@ -1,0 +1,67 @@
+{
+ "tag": "r1",
+ "when": "2026-10-22T03:50:47",
+ "python": "3.13.14",
+ "repeats": 3,
+ "models": {
+  "ball_20k": {
+   "model": "ball_20k",
+   "faces": 20480,
+   "stages": {
+    "thick_field": {
+     "ms": [
+      1773.09,
+      1798.99,
+      1721.38
+     ],
+     "median_ms": 1773.09,
+     "min_ms": 1721.38,
+     "max_ms": 1798.99,
+     "prep_ms": 45.14,
+     "base_mb": 128.33,
+     "end_delta_mb": 1.18,
+     "fingerprint": {
+      "n": 10242.0,
+      "min": 59.983,
+      "p5": 59.983,
+      "max": 59.986,
+      "mean": 59.9853
+     },
+     "error": null,
+     "peak_mb": 163.83,
+     "peak_delta_mb": 35.5
+    }
+   }
+  },
+  "ball_82k": {
+   "model": "ball_82k",
+   "faces": 81920,
+   "stages": {
+    "thick_field": {
+     "ms": [
+      6540.9,
+      6804.1,
+      6835.21
+     ],
+     "median_ms": 6804.1,
+     "min_ms": 6540.9,
+     "max_ms": 6835.21,
+     "prep_ms": 116.52,
+     "base_mb": 136.32,
+     "end_delta_mb": 11.96,
+     "fingerprint": {
+      "n": 40962.0,
+      "min": 59.996,
+      "p5": 59.996,
+      "max": 59.997,
+      "mean": 59.9963
+     },
+     "error": null,
+     "peak_mb": 278.93,
+     "peak_delta_mb": 142.61
+    }
+   }
+  }
+ },
+ "wall_s": 35.3
+}

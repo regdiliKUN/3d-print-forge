@@ -1,0 +1,66 @@
+{
+  "_about": "基准通过/失败阈值。改动本文件等于改动验收标准，必须走版本控制并说明理由。",
+  "_rationale": {
+    "时间_交互路径": "≤20k 面的常规件，目标 1 秒内完成。依据：<1s 用户无需等待提示；1-3s 必须有进度条否则以为卡死；>3s 该操作就不该放在同步请求里。当前 load/预览/单场检测/支撑属于交互路径，从严。",
+    "时间_高模与批处理": "82k 面以及镂空/空腔/修补这类本来就走异步任务队列的操作，放宽到 3-12s。理由：这些操作界面上已有进度条和任务队列，用户对耗时的容忍度高一个量级。",
+    "内存": "限的是**单阶段峰值增量**（阶段开始前的 RSS 到阶段内最高 RSS 的差值），不是进程总 RSS。理由：总 RSS 里含解释器和已导入库的固定开销（约 250MB），跟被测代码无关。阈值按模型网格本身大小的经验倍数设定——20k 面网格约 2MB、rtree 索引数十 MB，给到 400MB 已经是宽松上限，超过说明中间出现了失控的全量矩阵。",
+    "end_delta": "不做阈值，但持续监控。它是阶段结束后仍被持有的内存增量，用来抓缓存泄漏（例如射线索引缓存强引用住顶点数组，阶段结束后不还）。",
+    "机器": "阈值以 32 核 / 64GB 的开发机为准记录。换机器必须重新采集基线并重设阈值，否则数字不可比。"
+  },
+  "default": {"max_ms": 2000, "max_peak_delta_mb": 500},
+  "ball_20k": {
+    "load": {"max_ms": 200, "max_peak_delta_mb": 120},
+    "preview_payload": {"max_ms": 800, "max_peak_delta_mb": 250},
+    "analyze": {"max_ms": 1500, "max_peak_delta_mb": 400},
+    "thick_field": {"max_ms": 1500, "max_peak_delta_mb": 400},
+    "overhang_field": {"max_ms": 400, "max_peak_delta_mb": 200},
+    "comp_field": {"max_ms": 400, "max_peak_delta_mb": 200},
+    "section_profile": {"max_ms": 3000, "max_peak_delta_mb": 500},
+    "build_supports": {"max_ms": 1500, "max_peak_delta_mb": 300},
+    "support_density": {"max_ms": 2000, "max_peak_delta_mb": 400},
+    "hollow": {"max_ms": 6000, "max_peak_delta_mb": 600},
+    "cavity": {"max_ms": 6000, "max_peak_delta_mb": 600},
+    "export_stl": {"max_ms": 500, "max_peak_delta_mb": 150},
+    "export_3mf": {"max_ms": 1200, "max_peak_delta_mb": 250},
+    "export_obj": {"max_ms": 800, "max_peak_delta_mb": 200},
+    "export_ply": {"max_ms": 800, "max_peak_delta_mb": 200}
+  },
+  "ball_82k": {
+    "load": {"max_ms": 900, "max_peak_delta_mb": 400},
+    "preview_payload": {"max_ms": 3000, "max_peak_delta_mb": 700},
+    "analyze": {"max_ms": 5000, "max_peak_delta_mb": 1200},
+    "thick_field": {"max_ms": 6000, "max_peak_delta_mb": 1200},
+    "support_density": {"max_ms": 9000, "max_peak_delta_mb": 1500},
+    "hollow": {"max_ms": 12000, "max_peak_delta_mb": 1500},
+    "export_stl": {"max_ms": 2500, "max_peak_delta_mb": 600}
+  },
+  "plate_thin": {
+    "analyze": {"max_ms": 800, "max_peak_delta_mb": 200},
+    "thick_field": {"max_ms": 900, "max_peak_delta_mb": 250}
+  },
+  "broken_1k": {
+    "analyze": {"max_ms": 400, "max_peak_delta_mb": 120},
+    "fill_holes": {"max_ms": 2000, "max_peak_delta_mb": 250},
+    "fix_normals": {"max_ms": 400, "max_peak_delta_mb": 120}
+  },
+  "multi_5": {
+    "analyze": {"max_ms": 200, "max_peak_delta_mb": 100},
+    "comp_field": {"max_ms": 200, "max_peak_delta_mb": 100}
+  },
+  "xintersect": {"analyze": {"max_ms": 1500, "max_peak_delta_mb": 300}},
+  "overhang_t": {
+    "analyze": {"max_ms": 300, "max_peak_delta_mb": 100},
+    "overhang_field": {"max_ms": 200, "max_peak_delta_mb": 100},
+    "build_supports": {"max_ms": 600, "max_peak_delta_mb": 200},
+    "support_density": {"max_ms": 600, "max_peak_delta_mb": 200}
+  },
+  "inch_254": {"analyze": {"max_ms": 200, "max_peak_delta_mb": 80}},
+  "statue_30k": {
+    "hollow": {"max_ms": 8000, "max_peak_delta_mb": 700},
+    "cavity": {"max_ms": 8000, "max_peak_delta_mb": 700},
+    "export_stl": {"max_ms": 500, "max_peak_delta_mb": 150},
+    "export_3mf": {"max_ms": 1200, "max_peak_delta_mb": 250}
+  },
+  "degenerate": {"analyze": {"max_ms": 200, "max_peak_delta_mb": 80}},
+  "ascii_20k": {"load": {"max_ms": 500, "max_peak_delta_mb": 400}}
+}
