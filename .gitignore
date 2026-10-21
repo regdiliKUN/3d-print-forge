@@ -1,0 +1,27 @@
+# 环境
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 运行时数据（模型、产出、状态、日志）
+data/
+!data/.gitkeep
+
+# 基准测试产物（模型集与结果，按需单独提交基线 JSON）
+bench/models/
+bench/results/archive/
+*.npz
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+htmlcov/
