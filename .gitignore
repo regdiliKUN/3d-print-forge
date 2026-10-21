@@ -12,7 +12,8 @@ data/
 
 # 基准测试产物（模型集与结果，按需单独提交基线 JSON）
 bench/models/
-bench/results/archive/
+bench/tmp/
+bench/results/_*.log
 *.npz
 
 # 编辑器 / 系统

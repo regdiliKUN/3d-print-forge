@@ -494,6 +494,26 @@ def test_resolve_self_intersection_clamps_bad_pitch():
     assert float(out.volume) > 0
 
 
+def test_check_thickness_uses_coarse_value_when_full_misses(monkeypatch):
+    """全量 0 命中不能覆盖粗筛已经量到的薄点。"""
+    calls = {"n": 0}
+
+    def fake(mesh, sample_n=6000, multi_dir=3, max_dist=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"samples": 1, "min": 0.3, "median": 0.3, "p5": 0.3,
+                    "max": 0.3, "thin_ratio": 1.0, "fail_ratio": 1.0,
+                    "directions": 1}
+        return {"samples": 0, "min": None, "median": None, "p5": None,
+                "thin_ratio": 0.0, "directions": 3}
+
+    monkeypatch.setattr(analysis, "sample_wall_thickness", fake)
+    item = analysis.check_thickness(box(10.0), {"sample_faces": 100})
+    assert item["severity"] == "error", "粗筛 0.3mm 必须判低于 0.4mm 下限"
+    assert item["value"]["mode"] == "coarse_confirm"
+    assert item["value"]["min"] == pytest.approx(0.3)
+
+
 def test_wall_thickness_marks_degraded_on_raycast_failure(monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("raycast failed")
