@@ -30,6 +30,33 @@ TMP = BENCH / "tmp"
 EXPECTED = BENCH / "expected.json"
 
 
+def _env_fingerprint() -> dict:
+    """记录跑基准的机器与关键库版本。
+
+    耗时和内存的绝对值都依赖硬件与库版本。阈值是在「32 核 / 64GB / 特定库版本」
+    这台机器上定的，换环境后数字不可比——记下来是为了让 compare.py 在跨环境
+    对比时直接报警，而不是让人拿着两台机器的数字算出个「快了 3 倍」。
+    """
+    import os
+
+    import psutil
+
+    info: dict = {
+        "python": platform.python_version(),
+        "cpu_logical": os.cpu_count(),
+        "ram_total_gb": round(psutil.virtual_memory().total / 2 ** 30, 1),
+        "parallel": None,  # 由 main 在填 report 时再补，这里占位
+    }
+    # 关键第三方库的版本：几何/数值结果可能因它们的大版本变化而变
+    for mod in ["numpy", "scipy", "trimesh", "rtree", "psutil"]:
+        try:
+            m = __import__(mod)
+            info[f"lib_{mod}"] = getattr(m, "__version__", "?")
+        except Exception:
+            info[f"lib_{mod}"] = "missing"
+    return info
+
+
 def load_thresholds() -> dict:
     return json.loads((BENCH / "thresholds.json").read_text(encoding="utf-8"))
 
@@ -42,9 +69,15 @@ def main() -> int:
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--save-expected", action="store_true")
     ap.add_argument("--tag", default="")
+    ap.add_argument("--parallel", type=int, default=1,
+                    help="同时跑几个模型。省时间，但各 worker 会争 CPU，"
+                         "测出来的耗时与串行结果**不可比**，会记进结果文件")
     args = ap.parse_args()
     if args.quick:
         args.repeats = 1
+    if args.parallel > 1:
+        print(f"⚠ 并行度 {args.parallel}：各模型进程会争抢 CPU，"
+              f"本次耗时数据与串行基准不可直接比较")
 
     RESULTS.mkdir(parents=True, exist_ok=True)
     TMP.mkdir(parents=True, exist_ok=True)
@@ -56,24 +89,48 @@ def main() -> int:
     report: dict = {
         "tag": args.tag,
         "when": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "python": platform.python_version(),
         "repeats": args.repeats,
+        "parallel": args.parallel,
+        # 环境指纹：耗时和内存的绝对值都依赖机器与库版本。
+        # 阈值是在特定环境下定的，换环境后数字不可比——
+        # 记下来是为了让 compare.py 能在跨环境对比时直接报警，
+        # 而不是让人拿着两台机器的数字算出个「快了 3 倍」。
+        "env": _env_fingerprint(),
         "models": {},
     }
+    report["env"]["parallel"] = args.parallel
     t_start = time.perf_counter()
 
-    for model in models:
+    def _collect(model: str, code: int) -> None:
         out = TMP / f"{model}.json"
-        print(f"[bench] {model} …", flush=True)
+        if out.exists():
+            report["models"][model] = json.loads(out.read_text(encoding="utf-8"))
+        else:
+            print(f"  !! {model} 没有产出结果（退出码 {code}）")
+
+    def _run_one(model: str) -> tuple[str, int]:
+        out = TMP / f"{model}.json"
         cmd = [sys.executable, str(BENCH / "worker.py"), "--model", model,
                "--repeats", str(args.repeats), "--out", str(out)]
         if args.stages:
             cmd += ["--stages", args.stages]
         r = subprocess.run(cmd, cwd=str(ROOT))
-        if r.returncode != 0:
-            print(f"  !! worker 退出码 {r.returncode}")
         if out.exists():
-            report["models"][model] = json.loads(out.read_text(encoding="utf-8"))
+            return model, r.returncode
+        return model, -2
+
+    if args.parallel > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=args.parallel) as ex:
+            for model, code in ex.map(_run_one, models):
+                print(f"[bench] {model} 完成（退出码 {code}）", flush=True)
+                _collect(model, code)
+    else:
+        for model in models:
+            print(f"[bench] {model} …", flush=True)
+            _, code = _run_one(model)
+            _collect(model, code)
 
     report["wall_s"] = round(time.perf_counter() - t_start, 1)
 

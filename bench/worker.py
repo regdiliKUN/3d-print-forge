@@ -100,9 +100,17 @@ def main() -> None:
         for rep in range(args.repeats):
             clear_all_caches()
             mesh = None
+            load_err = None
             if stage not in stages.NO_MESH:
                 p0 = time.perf_counter()
-                mesh = meshio.load_mesh(path)
+                try:
+                    mesh = meshio.load_mesh(path)
+                except Exception as e:
+                    import traceback
+
+                    tb = traceback.format_exc().strip().splitlines()
+                    load_err = (f"{type(e).__name__}: {e} @ "
+                                f"{' | '.join(x.strip() for x in tb[-4:])}")
                 prep_list.append((time.perf_counter() - p0) * 1000)
             b = rss()
             base_list.append(b / MB)
@@ -110,6 +118,8 @@ def main() -> None:
             sampler.stdin.flush()
             t0 = time.perf_counter()
             try:
+                if load_err:
+                    raise RuntimeError(load_err)
                 raw, summary = fn(mesh, path, rec)
             except Exception as e:  # 记录失败但不让整个基准挂掉
                 import traceback

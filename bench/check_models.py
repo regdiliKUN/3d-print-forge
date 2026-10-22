@@ -18,8 +18,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app import meshio  # noqa: E402
+from bench import stages as st  # noqa: E402
 
 MANIFEST = Path(__file__).resolve().parent / "model_manifest.json"
+THR = Path(__file__).resolve().parent / "thresholds.json"
 # 浮点用相对误差：STL 是 float32 存的，读回来和生成时的 float64 必然有微小差异
 REL = 1e-4
 ABS = 1e-6
@@ -27,6 +29,48 @@ ABS = 1e-6
 
 def _close(a: float, b: float) -> bool:
     return abs(a - b) <= max(ABS, REL * max(abs(a), abs(b)))
+
+
+def _check_cross_source(man: dict) -> int:
+    """四源一致性：阶段矩阵 ↔ 清单 ↔ 磁盘文件 ↔ 阈值表。
+
+    这四方各自独立维护，任何一个改了漏改其他都会悄悄失效：
+    - 矩阵里多/少了模型，但清单没跟上 → 基准悄悄多测或少测一个模型
+    - 矩阵里的 (模型,阶段) 在阈值表没有专属条目 → 运行时静默回落默认线，PASS 是假的
+    """
+    problems: list[str] = []
+    models_dir = Path(__file__).resolve().parent / "models"
+    thr = json.loads(THR.read_text(encoding="utf-8")) if THR.exists() else {}
+
+    man_models = set(man.get("models", {}))
+    matrix_models = set(st.MATRIX)
+
+    # 1) 矩阵模型 ⊆ 清单模型
+    for m in sorted(matrix_models - man_models):
+        problems.append(f"矩阵里有 {m} 但清单/磁盘没有 → 基准会漏测")
+    # 2) 清单模型 ⊆ 矩阵模型（清单多余说明死模型，不会被测也不报错）
+    for m in sorted(man_models - matrix_models):
+        problems.append(f"清单里有 {m} 但矩阵没有 → 该模型永远不会被基准覆盖")
+    # 3) 清单模型 ⊆ 磁盘文件
+    for m in sorted(man_models):
+        f = man["models"][m].get("file")
+        if not (models_dir / f).exists():
+            problems.append(f"清单 {m} 的文件 {f} 不在磁盘上")
+    # 4) 矩阵 (模型,阶段) ⊆ 阈值表（缺则回落默认线，PASS 失真）
+    for m, slist in st.MATRIX.items():
+        mt = thr.get(m, {})
+        for s in slist:
+            if s not in mt:
+                problems.append(f"{m}/{s} 在阈值表没有专属条目 → 会用默认线（{thr['default']['max_ms']}ms）判")
+
+    print("\n【四源一致性：矩阵 ↔ 清单 ↔ 磁盘 ↔ 阈值】")
+    if problems:
+        for p in problems:
+            print("  ❌", p)
+        print(f"  共 {len(problems)} 处脱节")
+    else:
+        print("  ✅ 矩阵、清单、磁盘文件、阈值表 四方完全对得上")
+    return len(problems)
 
 
 def main() -> int:
@@ -67,9 +111,12 @@ def main() -> int:
     n = len(man["models"])
     if bad:
         print(f"❌ {bad}/{n} 个模型与清单不一致")
-        return 1
-    print(f"✅ {n}/{n} 个模型与清单完全一致（面数/顶点数/体积/表面积/包围盒）")
-    return 0
+    else:
+        print(f"✅ {n}/{n} 个模型与清单完全一致（面数/顶点数/体积/表面积/包围盒）")
+
+    cross = _check_cross_source(man)
+    total = bad + cross
+    return 1 if total else 0
 
 
 if __name__ == "__main__":

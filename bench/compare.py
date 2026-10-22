@@ -29,6 +29,31 @@ def _get(d: dict, m: str, s: str) -> dict | None:
     return (d.get("models", {}).get(m, {}).get("stages", {}) or {}).get(s)
 
 
+def _env_warnings(a: dict, b: dict) -> list[str]:
+    """跨环境对比时，绝对值不可比，必须显式警告。
+
+    阈值是在特定机器/库版本上定的，换一台机器或升级 numpy 后，
+    同样的代码可能跑出完全不同的数字。不报警就会让人误以为「优化了 3 倍」。
+    """
+    ea, eb = a.get("env") or {}, b.get("env") or {}
+    if not ea or not eb:
+        return []
+    warn: list[str] = []
+    for key in ("cpu_logical", "ram_total_gb", "python"):
+        va, vb = ea.get(key), eb.get(key)
+        if va != vb:
+            warn.append(f"{key}: A={va} ≠ B={vb}")
+    for mod in ("numpy", "scipy", "trimesh", "rtree"):
+        ka, kb = ea.get(f"lib_{mod}"), eb.get(f"lib_{mod}")
+        if ka != kb:
+            warn.append(f"{mod}: A={ka} → B={kb}")
+    # 并行度不同会让耗时不可比（争 CPU）
+    if ea.get("parallel") != eb.get("parallel"):
+        pa, pb = ea.get("parallel"), eb.get("parallel")
+        warn.append(f"parallel: A={pa} ≠ B={pb}（并行会争 CPU，耗时不可比）")
+    return warn
+
+
 def _fmt_change(before_ms: float, after_ms: float) -> str:
     """倍数与方向分开写，别让人去猜 1.06x 是快了还是慢了。"""
     ratio = after_ms / before_ms
@@ -44,6 +69,13 @@ def main() -> int:
         print(__doc__)
         return 2
     a, b = _load(sys.argv[1]), _load(sys.argv[2])
+
+    env_warn = _env_warnings(a, b)
+    if env_warn:
+        print("⚠ 环境不一致，以下绝对值差异不能直接当作优化/劣化：")
+        for w in env_warn:
+            print(f"    - {w}")
+        print()
 
     print(f"A = {Path(sys.argv[1]).name}   {a.get('when')}")
     print(f"B = {Path(sys.argv[2]).name}   {b.get('when')}")

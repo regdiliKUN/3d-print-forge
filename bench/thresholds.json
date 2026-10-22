@@ -5,13 +5,14 @@
     "时间_高模与批处理": "82k 面以及镂空/空腔/修补这类本来就走异步任务队列的操作，放宽到 3-12s。理由：这些操作界面上已有进度条和任务队列，用户对耗时的容忍度高一个量级。",
     "内存": "限的是**单阶段峰值增量**（阶段开始前的 RSS 到阶段内最高 RSS 的差值），不是进程总 RSS。理由：总 RSS 里含解释器和已导入库的固定开销（约 250MB），跟被测代码无关。阈值按模型网格本身大小的经验倍数设定——20k 面网格约 2MB、rtree 索引数十 MB，给到 400MB 已经是宽松上限，超过说明中间出现了失控的全量矩阵。",
     "end_delta": "不做阈值，但持续监控。它是阶段结束后仍被持有的内存增量，用来抓缓存泄漏（例如射线索引缓存强引用住顶点数组，阶段结束后不还）。",
-    "机器": "阈值以 32 核 / 64GB 的开发机为准记录。换机器必须重新采集基线并重设阈值，否则数字不可比。"
+    "机器": "阈值以 32 核 / 64GB 的开发机为准记录。换机器必须重新采集基线并重设阈值，否则数字不可比。",
+    "宽松上限的意图": "导出 / 镂空 / 空腔这类重操作，阈值留的是**绝对安全天花板**（百万面模型导出可能要几秒、镂空可能要十几秒），不是回归检测线。它们的退化由 bench 的结果指纹回归闸门捕捉，不靠时间阈值。所以 audit 把「过松」列为调优建议而非门禁失败——只有「缺阈值」（假 PASS）和「过紧」（换机假报警）才阻断 CI。"
   },
   "default": {"max_ms": 2000, "max_peak_delta_mb": 500},
   "empty": {"analyze": {"max_ms": 100, "max_peak_delta_mb": 50}},
   "needle": {
-    "analyze": {"max_ms": 400, "max_peak_delta_mb": 200},
-    "thick_field": {"max_ms": 1500, "max_peak_delta_mb": 300}
+    "analyze": {"max_ms": 350, "max_peak_delta_mb": 200},
+    "thick_field": {"max_ms": 120, "max_peak_delta_mb": 300}
   },
   "ball_20k": {
     "load": {"max_ms": 200, "max_peak_delta_mb": 120},
@@ -54,10 +55,10 @@
   },
   "xintersect": {"analyze": {"max_ms": 1500, "max_peak_delta_mb": 300}},
   "overhang_t": {
-    "analyze": {"max_ms": 300, "max_peak_delta_mb": 100},
-    "overhang_field": {"max_ms": 200, "max_peak_delta_mb": 100},
-    "build_supports": {"max_ms": 600, "max_peak_delta_mb": 200},
-    "support_density": {"max_ms": 600, "max_peak_delta_mb": 200}
+    "analyze": {"max_ms": 120, "max_peak_delta_mb": 100},
+    "overhang_field": {"max_ms": 50, "max_peak_delta_mb": 100},
+    "build_supports": {"max_ms": 240, "max_peak_delta_mb": 200},
+    "support_density": {"max_ms": 210, "max_peak_delta_mb": 200}
   },
   "inch_254": {"analyze": {"max_ms": 200, "max_peak_delta_mb": 80}},
   "statue_30k": {

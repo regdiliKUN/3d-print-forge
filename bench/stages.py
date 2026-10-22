@@ -74,6 +74,7 @@ def st_analyze(mesh, path: Path, rec):
                     if isinstance(v, (int, float, str, bool))},
         }
     return rep, {"quality": rep["quality"]["score"], "grade": rep["quality"]["grade"],
+                 "verdict": rep["quality"].get("verdict", ""),
                  "items": items}
 
 

@@ -14,6 +14,12 @@ data/
 bench/models/
 bench/tmp/
 bench/results/_*.log
+# 每次运行的产物：latest.json 与 bench-*.json 由 run.py 复生成，无需入库
+bench/results/latest.json
+bench/results/bench-*.json
+# 仅提交以下两个作为可追溯基线：
+#   bench/expected.json      —— 结果指纹回归基线（--save-expected 生成）
+#   bench/model_manifest.json —— 模型集几何清单
 *.npz
 
 # 编辑器 / 系统

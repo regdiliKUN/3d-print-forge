@@ -103,10 +103,40 @@ def make_rays(verts, faces, n, seed, multi_dir=1, max_dist=None):
     return origins, sets, eps, max_dist
 
 
+def check_summary_invariants(mesh) -> list[str]:
+    """验证 thickness_field 的聚合摘要与 values 自身一致。
+
+    逐射线比对只覆盖核心求交，没覆盖「生产入口的聚合层」：
+    thickness_field 把逐顶点壁厚压成 min/max/p5 摘要。若有人把 p5 误改成 p50、
+    或 min 算错、或字段名拼错，逐射线比对完全抓不到——因为 verify 根本不碰摘要。
+    这里直接断言聚合量与 values 的关系，守住聚合层。
+    """
+    r = analysis.thickness_field(mesh)
+    vals = np.asarray(r.get("values") or [], dtype=np.float64)
+    probs: list[str] = []
+    if vals.size == 0:
+        return probs  # 空/退化件本来就没有壁厚场，不算回归
+    if not np.isfinite(vals).all():
+        probs.append("values 含非有限值")
+    lo, hi, p5 = r.get("min"), r.get("max"), r.get("p5")
+    if lo is not None and abs(float(lo) - float(vals.min())) > 0.01:
+        probs.append(f"min {lo} ≠ values.min {vals.min():.3f}")
+    if hi is not None and abs(float(hi) - float(vals.max())) > 0.01:
+        probs.append(f"max {hi} ≠ values.max {vals.max():.3f}")
+    if p5 is not None:
+        truth = float(np.percentile(vals, 5))
+        if abs(float(p5) - truth) > 0.05:
+            probs.append(f"p5 {p5} ≠ 真实5分位 {truth:.3f}（聚合逻辑可能改了）")
+    return probs
+
+
 def main() -> int:
-    models = ["ball_20k", "plate_thin", "overhang_t", "multi_5", "xintersect",
-              "statue_30k", "broken_1k", "inch_254"]
+    # 极端形态优先：长宽比 1000:1 的针、退化件、12 面的盒子，
+    # 这些几何最能暴露「按包围盒对角线取尺度」那类假设的破绽。
+    models = ["needle", "degenerate", "inch_254", "multi_5", "overhang_t",
+              "plate_thin", "broken_1k", "xintersect", "statue_30k", "ball_20k"]
     bad = 0
+    sum_bad = 0
     print(f"{'模型':<12}{'射线':>6}{'方向':>5}{'最大差值':>12}{'命中数差':>10}{'新耗时':>9}{'旧耗时':>9}{'加速':>7}")
     print("-" * 82)
     for name in models:
@@ -148,11 +178,16 @@ def main() -> int:
             sp = total_old / max(total_new, 1e-9)
             print(f"{name:<12}{len(origins):>6}{md:>5}{worst:>12.2e}{nhit_diff:>10}"
                   f"{total_new*1000:>8.0f}ms{total_old*1000:>8.0f}ms{sp:>6.1f}x{flag}")
+        # 聚合层一致性：摘要与 values 自洽（守住逐射线比对覆盖不到的聚合逻辑）
+        sprobs = check_summary_invariants(mesh)
+        if sprobs:
+            sum_bad += 1
+            print(f"  ❌ {name} 聚合摘要异常: " + "; ".join(sprobs))
     print("-" * 82)
-    if bad:
-        print(f"❌ {bad} 个用例与旧实现不一致，改动不可接受")
+    if bad or sum_bad:
+        print(f"❌ {bad} 个逐射线用例不一致，{sum_bad} 个聚合摘要异常，改动不可接受")
         return 1
-    print("✅ 全部用例与旧实现逐位一致（含命中/未命中判定）")
+    print("✅ 全部用例与旧实现逐位一致（含命中/未命中判定），且厚度场聚合摘要自洽")
     return 0
 
 
