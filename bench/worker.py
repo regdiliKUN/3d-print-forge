@@ -41,7 +41,15 @@ MB = 1048576
 
 
 def clear_all_caches() -> None:
-    """把所有模块级缓存清空，确保测的是冷路径。"""
+    """把所有模块级缓存清空，确保测的是冷路径。
+
+    这里做**两次** gc.collect()：第一次回收直接引用，第二次回收因 finalizer
+    连锁释放的对象（例如带 __del__ 的几何中间体）。只收一次时，上一阶段刚释放
+    的大数组可能还没真正归还给堆，于是下一阶段测 base_mb 时堆仍偏高，而采样器
+    又会在下一阶段的 S/E 窗口里抓到那个「残影」峰值——表现为同一阶段有时 +1MB、
+    有时 +328MB 的离谱抖动（基准自测中已观察到）。彻底回收后再测 base_mb 能把这种
+    跨阶段内存归属噪声压下去。
+    """
     try:
         meshio.clear_cache()
     except Exception:
@@ -57,6 +65,7 @@ def clear_all_caches() -> None:
         advisor._SECTIONS_CACHE.clear()
     except Exception:
         pass
+    gc.collect()
     gc.collect()
 
 
