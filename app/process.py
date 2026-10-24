@@ -184,21 +184,28 @@ def drill_holes(mesh, count: int, diameter: float, wall: float, points: list | N
     if count <= 0 and not points:
         return mesh, {"holes": 0}
     skipped_thin = 0
+    thin_fallback = False
     if points:
         xy = np.asarray([[p[0], p[1]] for p in points], dtype=np.float64)
     else:
         xy = _bottom_sample_points(mesh, count * 3)
         # 孔必须打在够厚的地方：薄壁上一打就穿到侧面，孔变成豁口。
-        # 镂空件传 min_wall=0 跳过这层过滤——体素法的实际壳厚受 pitch 限制，
-        # 0.9mm 设定可能只做出 0.33mm，按名义壁厚卡会把所有位置都拒掉。
-        mw = min_wall if min_wall is not None else max(0.8, wall * 0.6)
-        if mw > 0:
-            xy, skipped_thin = _filter_thin_spots(mesh, xy, min_wall=mw)
+        # 注意这里不能用「名义壁厚」卡：体素法的实际壳厚受 pitch 限制，
+        # 0.9mm 设定可能只做出 0.33mm，按名义值过滤会把所有位置都拒掉。
+        # 所以阈值取「实测壳厚的 30%，且不低于 0.25mm」——只拦真正的纸片位。
+        mw = min_wall if min_wall is not None else max(0.25, wall * 0.3)
+        if mw > 0 and len(xy):
+            filtered, skipped_thin = _filter_thin_spots(mesh, xy, min_wall=mw)
+            if len(filtered) == 0:
+                # 全被拒时不能直接失败：宁可在薄处开孔并说明，也不让整条处理链挂掉
+                thin_fallback = True
+            else:
+                xy = filtered
         if len(xy) > count:
             sel = np.linspace(0, len(xy) - 1, count).astype(int)
             xy = xy[sel]
         if len(xy) == 0:
-            raise ValueError("底面找不到足够厚的位置开孔，请减小孔径或先加厚")
+            raise ValueError("底面找不到可开孔的位置，请改用点选排液孔位置")
     v = np.asarray(mesh.vertices)
     zmin, zmax = float(v[:, 2].min()), float(v[:, 2].max())
     depth = min(max(wall * 3.0, 4.0), (zmax - zmin) * 0.6)
@@ -217,6 +224,9 @@ def drill_holes(mesh, count: int, diameter: float, wall: float, points: list | N
         "depth": round(depth, 2),
         "positions": [[round(float(x), 2), round(float(y), 2)] for x, y in xy],
         "skipped_thin": skipped_thin,
+        "min_wall_checked": None if points else round(float(min_wall if min_wall is not None
+                                                          else max(0.25, wall * 0.3)), 3),
+        "thin_fallback": thin_fallback,
     }
 
 
@@ -230,6 +240,7 @@ def build_supports(
     points: list | None = None,
     platform_z: float = 0.0,
     avoid_model: bool = True,
+    min_support_h: float = 3.0,
 ) -> tuple[trimesh.Trimesh | None, dict]:
     v, f = np.asarray(mesh.vertices), np.asarray(mesh.faces)
     zmin = float(v[:, 2].min())
@@ -269,7 +280,10 @@ def build_supports(
         if len(anchors) > 1:
             from scipy.spatial import cKDTree
 
-            min_dist = max(0.5, float(diameter) * 1.5)
+            # 去重半径必须跟 spacing 挂钩。旧实现只看直径（diameter×1.5），
+            # 用户设 spacing=3mm 却得到 1.5mm 的柱间距——支撑比设定密一倍，
+            # 拆支撑的工作量和表面疤痕都翻倍。
+            min_dist = max(float(diameter) * 1.5, float(spacing) * 0.8)
             tree2d = cKDTree(anchors[:, :2])
             keep_mask = np.ones(len(anchors), dtype=bool)
             for i, j in sorted(tree2d.query_pairs(min_dist)):
@@ -300,10 +314,10 @@ def build_supports(
     except Exception:
         pass
 
-    # 判断「悬垂点下方 10mm 内是不是实体」。
-    # 三个坑：trimesh 的 intersects_location 起点贴近表面时返回 0 命中；
-    # mesh.contains 在表面附近也不稳。所以直接用自己实现的 Möller–Trumbore，
-    # 它只看几何交点、不区分内外，正好适合这个判断。
+    # 判断「悬垂点正下方是不是自己的实体」。是的话这根柱只有几毫米，
+    # 属于台阶而不是悬垂，撑上去反而在表面留疤——按 min_support_h 统一判定。
+    # 旧实现这里写死 3.0，注释却写 10mm，两者对不上；现在两处都用同一个参数，
+    # 并写进报告，用户看到「跳过 N 根」时能知道是按什么尺度判的。
     solid_below = np.zeros(len(anchors), dtype=bool)
     if avoid_model and len(anchors):
         try:
@@ -315,11 +329,11 @@ def build_supports(
             dist = analysis._raycast_nearest(
                 np.asarray(mesh.vertices, dtype=np.float64),
                 np.asarray(mesh.faces),
-                probe, down, 1e-4, max_dist=3.0,
+                probe, down, 1e-4, max_dist=float(min_support_h),
             )
             solid_below = np.isfinite(dist)
         except Exception:
-            solid_below = hit_model & (np.asarray(anchors[:, 2] - land_z) < 10.0)
+            solid_below = hit_model & (np.asarray(anchors[:, 2] - land_z) < float(min_support_h))
 
     parts = []
     heights = []
@@ -345,6 +359,8 @@ def build_supports(
     return sup, {
         "count": len(parts),
         "diameter": diameter,
+        "spacing": float(spacing),
+        "min_support_h_mm": float(min_support_h),
         "platform_z": round(base_z, 3),
         "min_height": round(float(min(heights)), 2),
         "max_height": round(float(max(heights)), 2),
@@ -370,8 +386,22 @@ def apply_pipeline(mesh, p: dict, progress=None) -> tuple[trimesh.Trimesh, trime
 
     step(0.1, "减面")
     if float(p["decimate_ratio"]) < 0.999:
-        mesh = decimate_mesh(mesh, float(p["decimate_ratio"]))
-        report["decimate"] = {"ratio": p["decimate_ratio"], "faces": len(mesh.faces)}
+        was_watertight = bool(mesh.is_watertight)
+        vol_before = abs(float(mesh.volume)) if was_watertight else 0.0
+        dec = decimate_mesh(mesh, float(p["decimate_ratio"]))
+        dinfo = {"ratio": p["decimate_ratio"], "faces": int(len(dec.faces))}
+        if vol_before > 0 and float(dec.volume) > 0:
+            dinfo["volume_change_pct"] = round((abs(float(dec.volume)) - vol_before) / vol_before * 100, 2)
+        # 减面是边折叠，遇到非流形/极不均匀的网格会在实体上留下裂缝。
+        # 以前减完直接用：镂空那步报「模型不水密」，用户根本想不到是减面干的。
+        # 这里当场验收，破坏水密就退回原网格并说明。
+        if was_watertight and not dec.is_watertight:
+            dinfo["reverted"] = True
+            dinfo["faces_kept"] = int(len(mesh.faces))
+            dinfo["reason"] = "减面破坏了水密性（边折叠在细碎处留下裂缝），已保留原网格继续处理"
+        else:
+            mesh = dec
+        report["decimate"] = dinfo
 
     step(0.25, "镂空")
     if p["hollow"]:
@@ -387,8 +417,11 @@ def apply_pipeline(mesh, p: dict, progress=None) -> tuple[trimesh.Trimesh, trime
                 f"壳厚 {wall}mm 超过模型最薄处 {min_wall}mm 的 45%，已自动降到 {safe}mm，否则会把壁切穿"
             )
             wall = safe
-        saved = voxelops.cavity_volume(mesh, wall)
-        mesh, _ = voxelops.hollow_shell(mesh, wall)
+        # 体积预估与镂空共用同一次体素化/EDT：旧写法先 cavity_volume 再
+        # hollow_shell，同一张网格跑了两遍 O(N³)，20k 面实测多花约 0.9s、+420MB。
+        hollow_stats: dict = {}
+        mesh, _ = voxelops.hollow_shell(mesh, wall, stats=hollow_stats)
+        saved = float(hollow_stats.get("cavity_mm3", 0.0))
         report["hollow"] = {
             "wall_mm": wall,
             "cavity_mm3": round(saved, 1),
@@ -407,9 +440,13 @@ def apply_pipeline(mesh, p: dict, progress=None) -> tuple[trimesh.Trimesh, trime
         mesh, dinfo = drill_holes(
             mesh, int(p["drain_holes"]), float(p["hole_diameter"]),
             float(p["wall_thickness"]), p.get("drain_hole_points") or None,
-            min_wall=0.0 if p["hollow"] else None,
         )
         report["drill"] = dinfo
+        if dinfo.get("thin_fallback"):
+            report.setdefault("warnings", []).append(
+                f"底面 {dinfo.get('skipped_thin', 0)} 个候选位置壳厚不足，全部被拒；"
+                "已在最薄处开孔，请打印后确认孔是否打穿而不是打成豁口。"
+            )
 
     step(0.7, "生成支撑")
     sup = None
@@ -439,6 +476,14 @@ def apply_pipeline(mesh, p: dict, progress=None) -> tuple[trimesh.Trimesh, trime
             sup.apply_scale(factor)
         report["scale"] = {"factor": round(factor, 4),
                            "extents": [round(float(x), 2) for x in mesh.extents]}
+        if report.get("supports") and report["supports"].get("count"):
+            # 支撑直径是工艺参数（mm），但整体缩放会把它一起放大。
+            # 报告里只写用户填的 1.0mm 会误导：实际打出来是 factor×1.0。
+            eff = round(float(p["support_diameter"]) * factor, 3)
+            report["supports"]["diameter_effective"] = eff
+            report["supports"]["note"] = (
+                f"支撑直径随整体缩放同比放大：设定 {p['support_diameter']}mm → 实际 {eff}mm"
+            )
     return mesh, sup, report
 
 
@@ -453,7 +498,7 @@ def run_job(ctx, params):
 
     src = Path(proj.get("current") or proj["source"])
     ctx.tick(0.03, "加载模型", "load")
-    mesh = meshio.load_mesh(src)
+    mesh = meshio.load_mesh(src, mutable=True)
     before = meshio.mesh_stats(mesh)
 
     def progress(frac: float, msg: str) -> None:
@@ -466,7 +511,10 @@ def run_job(ctx, params):
     final.apply_translation([0, 0, -float(final.bounds[0][2])])
     out = config.OUTPUTS / f"{pid}_processed_{int(time.time())}.stl"
     final.export(str(out))
-    after = meshio.mesh_stats(mesh)
+    # 统计口径必须和导出的文件一致：以前这里统计的是不含支撑的 mesh，
+    # 用户拿到的 STL 面数比界面上显示的多一大截（支撑也是实体）。
+    after = meshio.mesh_stats(final)
+    after["mesh_only_faces"] = int(len(mesh.faces))
     after["with_supports"] = sup_mesh is not None
 
     store.add_history(pid, "process", p, out,

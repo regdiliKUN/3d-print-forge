@@ -4,7 +4,9 @@
 """
 from __future__ import annotations
 
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +14,61 @@ import numpy as np
 from . import config, meshio, store
 
 SEV_ORDER = {"ok": 0, "info": 1, "warning": 2, "error": 3}
+
+
+# ---------------------------------------------------------------- 派生数据记忆化
+# 七项检测里有四项要的是同一批派生量：边直方图（水密/非流形）、重复面
+# （水密/非流形）、连通分量（法线/孤立面片）。同一张网格上它们被重复算了
+# 2~3 遍，在 18 万面的模型上约占总耗时的三成。
+#
+# 缓存键用 (id(faces), len(faces), 附加参数)，并且**持有数组引用**：
+# 只要缓存还在，id 就不会被别的对象复用，键不会串。条数上限很小，
+# 只覆盖「同一次检测里的同几项」，不会无界增长。
+_MEMO: "OrderedDict[tuple, tuple]" = OrderedDict()
+_MEMO_LOCK = threading.RLock()
+_MEMO_MAX = 12
+
+
+def _memo(key: tuple, arr: np.ndarray, fn):
+    k = key + (id(arr), len(arr))
+    with _MEMO_LOCK:
+        hit = _MEMO.get(k)
+        if hit is not None:
+            _MEMO.move_to_end(k)
+            return hit[1]
+        val = fn()
+        _MEMO[k] = (arr, val)
+        while len(_MEMO) > _MEMO_MAX:
+            _MEMO.popitem(last=False)
+        return val
+
+
+def clear_memo() -> None:
+    with _MEMO_LOCK:
+        _MEMO.clear()
+
+
+def _mesh_memo(mesh, key: str, fn):
+    """把派生量挂在网格对象上共享。
+
+    不能按 `id(faces)` 缓存：trimesh 的 `faces` 属性每次访问都可能返回**新的**
+    数组对象（实测两次 `np.asarray(mesh.faces)` 不是同一个对象），
+    按数组身份做键永远命中不了。网格对象本身在整轮检测里是同一个，
+    挂属性既不会串键，也随网格一起被回收。
+    """
+    cache = getattr(mesh, "_wb_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            mesh._wb_cache = cache
+        except Exception:  # noqa: BLE001
+            return fn()
+    with _MEMO_LOCK:
+        if key in cache:
+            return cache[key]
+        val = fn()
+        cache[key] = val
+        return val
 
 
 # ---------------------------------------------------------------- 几何工具
@@ -30,16 +87,22 @@ def edge_keys(faces: np.ndarray, nverts: int) -> np.ndarray:
 
 
 def edge_histogram(faces: np.ndarray, nverts: int) -> dict:
+    """边直方图。同一张网格上水密性/非流形两项都要用，记忆化避免重复扫描。"""
+    faces = np.asarray(faces)
     if len(faces) == 0:
-        return {"boundary": 0, "nonmanifold": 0, "total": 0}
-    keys = edge_keys(faces, nverts)
-    _, counts = np.unique(keys, return_counts=True)
-    return {
-        "boundary": int((counts == 1).sum()),
-        "nonmanifold": int((counts > 2).sum()),
-        "total": int(len(counts)),
-        "max_share": int(counts.max()) if len(counts) else 0,
-    }
+        return {"boundary": 0, "nonmanifold": 0, "total": 0, "max_share": 0}
+
+    def _calc() -> dict:
+        keys = edge_keys(faces, nverts)
+        _, counts = np.unique(keys, return_counts=True)
+        return {
+            "boundary": int((counts == 1).sum()),
+            "nonmanifold": int((counts > 2).sum()),
+            "total": int(len(counts)),
+            "max_share": int(counts.max()) if len(counts) else 0,
+        }
+
+    return _memo(("edges", int(nverts)), faces, _calc)
 
 
 def duplicate_face_count(faces: np.ndarray) -> int:
@@ -47,10 +110,16 @@ def duplicate_face_count(faces: np.ndarray) -> int:
 
     只数开放边/非流形边发现不了「整张面被复制一遍」：每条边照样有两个面，
     但实际是 4 个面共享，切片器会得到两张重合的皮。必须按面去重后才能判断。
+    排序 + unique 是 O(n log n)，水密性和非流形两项都要用，走记忆化。
     """
+    faces = np.asarray(faces)
     if len(faces) < 2:
         return 0
-    return int(len(faces) - len(np.unique(np.sort(np.asarray(faces), axis=1), axis=0)))
+
+    def _calc() -> int:
+        return int(len(faces) - len(np.unique(np.sort(faces, axis=1), axis=0)))
+
+    return _memo(("dup",), faces, _calc)
 
 
 def tri_areas(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
@@ -97,17 +166,38 @@ def component_volumes(verts: np.ndarray, faces: np.ndarray) -> tuple[int, np.nda
     return n, labels, vols
 
 
+def sanitize_small_ratio(value, default: float = 0.01) -> float:
+    """碎屑阈值只允许 [0, 0.5]：这是「碎屑面积 / 最大部件面积」的比例。
+
+    检测项与修复动作必须用同一套收敛规则，否则会出现「报告说两个部件都是碎屑、
+    动作只删掉一个」这种自相矛盾。旧实现里 `check_components` 直接用
+    `float(params["small_ratio"])`：传 5 会把主件也判成碎屑，传 "abc" 直接抛异常。
+    """
+    try:
+        r = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not np.isfinite(r):
+        return default
+    return float(min(max(r, 0.0), 0.5))
+
+
 def classify_components(verts: np.ndarray, faces: np.ndarray,
-                        small_ratio: float = 0.01) -> dict:
+                        small_ratio: float = 0.01, labels=None) -> dict:
     """把连通分量分成 实体 / 内腔 / 碎屑 三类。
 
     判据不是「体积为负就是内腔」：一块翻面的小碎屑也是负体积。负体积分量
     必须位于某个正体积实体内部才算内腔；在外面的负体积分量是碎屑。
     返回的 sizes 按面积降序，供检测报告与移除碎屑动作共用，避免两处各写一套。
     """
+    small_ratio = sanitize_small_ratio(small_ratio)
     verts = np.asarray(verts, dtype=np.float64)
     faces = np.asarray(faces)
-    n, labels = union_components(faces, len(verts))
+    if labels is None:
+        n, labels = union_components(faces, len(verts))
+    else:
+        labels = np.asarray(labels)
+        n = int(labels.max()) + 1 if len(labels) else 0
     if n == 0:
         return {"components": 0, "sizes": [], "tiny": 0, "cavities": 0, "labels": labels}
     areas = tri_areas(verts, faces)
@@ -173,19 +263,35 @@ def face_normals(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
 
 
 def union_components(faces: np.ndarray, nverts: int) -> tuple[int, np.ndarray]:
-    """按共享顶点把面分组，返回 (分量数, 每个面的分量标签)。"""
+    """按共享顶点把面分组，返回 (分量数, 每个面的分量标签)。
+
+    与 `edge_keys` 一样不信任调用方传入的 nverts：外部文件里出现越界面索引时，
+    邻接矩阵会按 nverts 建形状，coo_matrix 直接抛
+    「axis 1 index N exceeds matrix dimension M」，整项检测连带整个报告失败。
+    这里按实际最大索引收紧，越界索引只会变成孤立顶点，不会让检测崩掉。
+    """
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
 
     if len(faces) == 0:
         return 0, np.zeros(0, np.int32)
-    e = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
-    e = np.unique(np.sort(e, axis=1), axis=0)
-    adj = coo_matrix(
-        (np.ones(len(e), np.int8), (e[:, 0], e[:, 1])), shape=(nverts, nverts)
-    )
-    n, labels = connected_components(adj, directed=False)
-    return int(n), labels[faces[:, 0]].astype(np.int32)
+    faces = np.asarray(faces, dtype=np.int64)
+    nverts = max(int(nverts), int(np.max(faces)) + 1, 1)
+
+    def _calc():
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+
+        e = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+        e = np.unique(np.sort(e, axis=1), axis=0)
+        adj = coo_matrix(
+            (np.ones(len(e), np.int8), (e[:, 0], e[:, 1])), shape=(nverts, nverts)
+        )
+        n, labels = connected_components(adj, directed=False)
+        return int(n), labels[faces[:, 0]].astype(np.int32)
+
+    # 法线检测与孤立面片检测都要分量标签，连通分量的构建在稠密网格上是百毫秒级
+    return _memo(("comp", nverts), faces, _calc)
 
 
 # ---------------------------------------------------------------- 自相交
@@ -335,6 +441,51 @@ def tri_tri_overlap(T1: np.ndarray, T2: np.ndarray, tol: float = 1e-7) -> tuple[
     return hit, coplanar & hit
 
 
+def _candidate_pairs(centers: np.ndarray, radii: np.ndarray, diag: float,
+                     tree=None) -> tuple[np.ndarray, int]:
+    """生成「可能相交」的三角形对，且**保证不漏**。
+
+    判据是充分条件：两个三角形若相交，交点同时落在两者内部，于是
+    |c_i - c_j| <= r_i + r_j <= 2·max(r_i, r_j)。
+
+    旧实现用「99 分位半径 × 2.2，再用包围盒对角线 × 0.25 封顶」当统一搜索半径，
+    只要有一对「大三角形 + 远处小三角形」的圆心距超过封顶值就直接漏检
+    （实测：200mm 细长三角形与 60mm 外的小三角形真实穿插，检出数 0）。
+
+    这里改成两层，代价仍接近原来的单次查询：
+    - 批量层：半径 p（= min(99.9 分位, 上限/2)）内的所有对一次查出，
+      覆盖「两个半径都 ≤ p」的全部对；
+    - 补查层：半径 > p 的少数大三角形逐个按 2·r_i 查询，覆盖「至少一个半径 > p」的对。
+    两层并集就是全部可能相交的对，没有分位数近似。
+    """
+    from scipy.spatial import cKDTree
+
+    if tree is None:
+        tree = cKDTree(centers)
+    # 上限：超过对角线 1/4 的搜索半径在稠密网格上会让候选对爆炸，
+    # 但被截掉的那部分由补查层负责，不牺牲完整性。
+    cap = max(diag * 0.25, 1e-9)
+    p = min(float(np.percentile(radii, 99.9)) if len(radii) else 0.0, cap * 0.5)
+    p = max(p, 1e-12)
+    pairs = tree.query_pairs(r=2.0 * p, output_type="ndarray")
+    large = np.flatnonzero(radii > p)
+    if len(large):
+        extra = []
+        for i in large:
+            nb = tree.query_ball_point(centers[i], 2.0 * float(radii[i]))
+            if not nb:
+                continue
+            nb = np.asarray(nb, dtype=np.int64)
+            nb = nb[nb != i]
+            if len(nb):
+                extra.append(np.column_stack([np.full(len(nb), int(i), np.int64), nb]))
+        if extra:
+            e = np.sort(np.vstack(extra), axis=1)
+            pairs = np.vstack([pairs, e]) if len(pairs) else e
+            pairs = np.unique(pairs, axis=0)
+    return pairs, int(len(large))
+
+
 def find_self_intersections(verts: np.ndarray, faces: np.ndarray, max_pairs: int = 400_000) -> dict:
     """KD 树取局部候选对，再做精确三角-三角相交判定。自交在物理上都是局部的。"""
     from scipy.spatial import cKDTree
@@ -344,39 +495,40 @@ def find_self_intersections(verts: np.ndarray, faces: np.ndarray, max_pairs: int
     t = verts[faces].astype(np.float64)
     centers = t.mean(axis=1)
     radii = np.linalg.norm(t - centers[:, None, :], axis=2).max(axis=1)
-    # 用 99 分位而不是 90 分位：模型里混着细长三角形时，90 分位会让搜索半径偏小，
-    # 远端的穿插直接漏检。同时用包围盒对角线封顶，避免候选对爆炸。
     diag = float(np.linalg.norm(np.ptp(verts, axis=0))) or 1.0
-    r = min(float(np.percentile(radii, 99)) * 2.2, diag * 0.25)
-    r = max(r, 1e-6)
     tree = cKDTree(centers)
-    pairs = tree.query_pairs(r=r, output_type="ndarray")
+    pairs, n_large = _candidate_pairs(centers, radii, diag, tree)
     if len(pairs) == 0:
-        return {"count": 0, "pairs": [], "sampled": False}
+        return {"count": 0, "pairs": [], "sampled": False, "large_triangles": n_large}
     sampled = False
-    if len(pairs) > max_pairs:
-        idx = np.random.default_rng(7).choice(len(pairs), max_pairs, replace=False)
-        pairs = pairs[idx]
-        sampled = True
     candidate_pairs = int(len(pairs))
-    # 共享顶点数：3=完全重复的面；2=共边的邻居，只沿边接触不算穿插；
-    # 1=共顶点（折叠面可能真穿插，要判）；0=普通候选对。
-    f1, f2 = faces[pairs[:, 0]], faces[pairs[:, 1]]
-    share = (f1[:, :, None] == f2[:, None, :]).any(axis=2).sum(axis=1)
 
-    # AABB 粗筛（先做，便宜）
+    # AABB 粗筛（先做，便宜且不需要物化 share 的 (K,3,3) 布尔矩阵）
     amin = t[pairs[:, 0]].min(axis=1)
     amax = t[pairs[:, 0]].max(axis=1)
     bmin = t[pairs[:, 1]].min(axis=1)
     bmax = t[pairs[:, 1]].max(axis=1)
     box_ok = np.all(amin <= bmax + 1e-9, axis=1) & np.all(bmin <= amax + 1e-9, axis=1)
-    pairs, share = pairs[box_ok], share[box_ok]
+    pairs = pairs[box_ok]
     if len(pairs) == 0:
-        return {"count": 0, "pairs": [], "sampled": sampled, "candidate_pairs": candidate_pairs}
+        return {"count": 0, "pairs": [], "sampled": sampled,
+                "candidate_pairs": candidate_pairs, "large_triangles": n_large}
+
+    # 共享顶点数：3=完全重复的面；2=共边的邻居，只沿边接触不算穿插；
+    # 1=共顶点（折叠面可能真穿插，要判）；0=普通候选对。
+    f1, f2 = faces[pairs[:, 0]], faces[pairs[:, 1]]
+    share = (f1[:, :, None] == f2[:, None, :]).any(axis=2).sum(axis=1)
 
     dup_pairs = pairs[share >= 3]
     # 共边邻居只沿共享边接触，是合法拓扑；共顶点（share=1）和不共顶点（share=0）才做精确判定
     test_pairs = pairs[share < 2]
+    # 采样上限只作用于「真正要精确判定」的对：旧实现先按全部候选对（含大量
+    # 合法共边邻居）截断，等于把采样预算浪费在必然被排除的对上，
+    # 稠密网格上 40 万对里可能只有一小部分进入判定。
+    if len(test_pairs) > max_pairs:
+        idx = np.random.default_rng(7).choice(len(test_pairs), max_pairs, replace=False)
+        test_pairs = test_pairs[idx]
+        sampled = True
     scale = float(max(np.ptp(verts, axis=0))) or 1.0
     tol = max(1e-9, scale * 1e-6)
     if len(test_pairs):
@@ -392,7 +544,10 @@ def find_self_intersections(verts: np.ndarray, faces: np.ndarray, max_pairs: int
         "sampled": sampled,
         "candidate_pairs": candidate_pairs,
         "tested_pairs": int(len(test_pairs)),
+        "large_triangles": n_large,
         "tolerance": tol,
+        # 采样意味着 count 是下限而不是精确值，报告层必须据此调整措辞
+        "count_is_lower_bound": bool(sampled),
     }
 
 
@@ -567,7 +722,13 @@ def sample_wall_thickness(mesh, sample_n: int = 6000, multi_dir: int = 3,
     faces = np.asarray(mesh.faces)
     if len(faces) == 0:
         return {"samples": 0, "min": None, "median": None, "p5": None, "thin_ratio": 0.0}
-    n = min(sample_n, len(faces))
+    # 采样数必须收敛成合法正整数：负数会让 rng.choice 抛
+    # 「negative dimensions are not allowed」，0 则什么都测不到
+    try:
+        sample_n = int(sample_n)
+    except (TypeError, ValueError):
+        sample_n = 6000
+    n = min(max(1, sample_n), len(faces))
     rng = np.random.default_rng(11)
     idx = rng.choice(len(faces), n, replace=False)
     t = verts[faces[idx]]
@@ -606,10 +767,13 @@ def sample_wall_thickness(mesh, sample_n: int = 6000, multi_dir: int = 3,
         }
     ok = thick[np.isfinite(thick) & (thick > 0)]
     if len(ok) == 0:
-        return {"samples": 0, "min": None, "median": None, "p5": None, "thin_ratio": 0.0}
+        # 带上「采样了多少个面」：调用方要区分「采样少所以没测到」和「确实都很厚」
+        return {"samples": 0, "min": None, "median": None, "p5": None,
+                "thin_ratio": 0.0, "sample_faces": int(n)}
     th = config.get().thresholds
     return {
         "samples": int(len(ok)),
+        "sample_faces": int(n),
         "min": round(float(ok.min()), 3),
         "median": round(float(np.median(ok)), 3),
         "p5": round(float(np.percentile(ok, 5)), 3),
@@ -626,10 +790,35 @@ def infer_units(extents) -> dict:
     if mx <= 0:
         return {"unit": "unknown", "max_dim": 0, "scale": 1.0, "message": "尺寸为零，无法推断"}
     if mx < 1.0:
+        # 「最大尺寸 0.5」有两种同样合理的解释：0.5 米（按米建模的家具）和
+        # 0.5 毫米（微缩件 / 珠宝件）。旧实现一律判米并建议 ×1000，
+        # 微缩件会被放大成半米——比不提示更糟。这里按量级区分：
+        # 小于 0.2 基本不可能是毫米件（0.2mm 以下几乎没有可打印件），判米；
+        # 0.2~1.0 明确标为二义，给出两种结论，让用户自己选。
+        as_mm = mx
+        if as_mm >= 0.2:
+            return {
+                "unit": "m?",
+                "max_dim": round(mx, 4),
+                "scale": 1000.0,
+                "ambiguous": True,
+                "alternatives": [
+                    {"unit": "m", "scale": 1000.0,
+                     "label": f"按米建模：实际 {mx * 1000:.0f}mm"},
+                    {"unit": "mm", "scale": 1.0,
+                     "label": f"按毫米建模：实际 {mx:.2f}mm（微缩件）"},
+                ],
+                "message": (
+                    f"最大尺寸 {mx:.4f} 有两种解释：按米建模是 {mx * 1000:.0f}mm，"
+                    f"按毫米建模是 {mx:.2f}mm（微缩件 / 珠宝件）。"
+                    "先确认建模单位再换算，不要盲目放大 1000 倍。"
+                ),
+            }
         return {
             "unit": "m",
             "max_dim": round(mx, 4),
             "scale": 1000.0,
+            "ambiguous": False,
             "message": f"最大尺寸 {mx:.4f}，量级对应米。建议放大 1000 倍转为毫米。",
         }
     if mx <= 400.0:
@@ -642,6 +831,7 @@ def infer_units(extents) -> dict:
                 "unit": "mm?",
                 "max_dim": round(mx, 2),
                 "scale": 1.0,
+                "ambiguous": True,
                 "message": (
                     f"最大尺寸 {mx:.1f}mm，恰好等于 {nearest} 英寸（{as_in:.2f}）。"
                     f"数值本身是毫米无需换算，但如果原模型是按英寸设计的等比件，实际尺寸应为 {mx * 25.4:.0f}mm。"
@@ -651,6 +841,7 @@ def infer_units(extents) -> dict:
             "unit": "mm",
             "max_dim": round(mx, 2),
             "scale": 1.0,
+            "ambiguous": False,
             "message": f"最大尺寸 {mx:.1f}mm，在绝大多数桌面机成型范围内，无需换算。",
         }
     if mx <= 1000.0:
@@ -658,6 +849,7 @@ def infer_units(extents) -> dict:
             "unit": "mm",
             "max_dim": round(mx, 2),
             "scale": 1.0,
+            "ambiguous": False,
             "message": f"最大尺寸 {mx:.1f}mm，偏大。请确认是否超出你的成型空间。",
         }
     # 超过 1 米：要么是 cm/inch 误存，要么真的是超大件
@@ -668,6 +860,7 @@ def infer_units(extents) -> dict:
             "unit": "inch",
             "max_dim": round(mx, 2),
             "scale": 1 / 25.4,
+            "ambiguous": False,
             "message": f"最大尺寸 {mx:.1f} 恰好是 {nearest} 英寸（{as_in:.2f}），判定为英寸建模，应缩小 25.4 倍。",
         }
     if mx <= 5000.0:
@@ -675,12 +868,14 @@ def infer_units(extents) -> dict:
             "unit": "cm?",
             "max_dim": round(mx, 2),
             "scale": 0.1,
+            "ambiguous": True,
             "message": f"最大尺寸 {mx:.0f}，超出常规毫米件范围。若原模型按厘米设计（约 {mx / 10:.0f}cm），应缩小 10 倍。",
         }
     return {
         "unit": "oversize",
         "max_dim": round(mx, 2),
         "scale": 0.001,
+        "ambiguous": False,
         "message": f"最大尺寸 {mx:.0f}，远超打印范围，可能是微米单位或数值异常。请核对原始 CAD 单位。",
     }
 
@@ -700,8 +895,8 @@ def _item(id_, name, severity, message, value=None, fix=None, details=None) -> d
 
 def check_watertight(mesh, params, ctx=None) -> dict:
     verts, faces = np.asarray(mesh.vertices), np.asarray(mesh.faces)
-    h = edge_histogram(faces, len(verts))
-    dup = duplicate_face_count(faces)
+    h = _mesh_memo(mesh, "edges", lambda: edge_histogram(faces, len(verts)))
+    dup = _mesh_memo(mesh, "dup", lambda: duplicate_face_count(faces))
     if h["boundary"] == 0 and h["nonmanifold"] == 0 and dup == 0:
         return _item("watertight", "水密性", "ok", "所有边都被恰好两个面共享，模型闭合，可直接布尔运算与切片。",
                      {"boundary_edges": 0})
@@ -735,7 +930,9 @@ def check_normals(mesh, params, ctx=None) -> dict:
     degenerate = int((areas < 1e-12).sum())
     ext = float(max(np.ptp(verts, axis=0))) if len(verts) else 1.0
     vol_tol = max(1e-9, ext ** 3 * 1e-9)
-    n_comp, _labels, vols = component_volumes(verts, faces)
+    n_comp, labels, vols = _mesh_memo(
+        mesh, "component_volumes", lambda: component_volumes(verts, faces))
+    _mesh_memo(mesh, "labels", lambda: (n_comp, labels))
     inverted = [c for c in range(n_comp) if vols[c] < -vol_tol]
     conflicts = winding_conflict_count(faces)
     msgs, sev, fixes = [], "ok", None
@@ -772,7 +969,11 @@ def check_thickness(mesh, params, ctx=None) -> dict:
     先抽 600 面粗测，如果最薄处都在告警线两倍以上，就没必要再跑全量——
     实测这一步让厚模型省掉约 90% 的检测时间。
     """
-    n = int(params.get("sample_faces", 1500))
+    try:
+        n = int(params.get("sample_faces", 1500))
+    except (TypeError, ValueError):
+        n = 1500
+    n = max(1, min(n, 200_000))
     th = config.get().thresholds
     limit = th.wall_warn * 2
     # 粗筛只需要回答「有没有比告警线两倍更薄的地方」，所以射线直接截断到该距离。
@@ -786,8 +987,24 @@ def check_thickness(mesh, params, ctx=None) -> dict:
         quick["mode"] = "coarse"
         quick["min"] = round(limit, 2)
         quick["lower_bound"] = True
+        total_faces = max(1, len(mesh.faces))
+        sampled = int(quick.get("sample_faces") or min(600, n))
+        # 空网格（0 面）时 sampled/1 会算出 600 这种荒谬覆盖率，封顶到 1
+        coverage = min(1.0, sampled / total_faces)
+        quick["coverage"] = round(coverage, 5)
+        quick["sampled_faces"] = sampled
+        # 覆盖率高就说「安全」，覆盖率低只能说「粗筛没发现」——
+        # 20 万面模型只测 600 面（0.3%）时，一块 0.1% 面积的局部薄壁有一半概率被漏掉，
+        # 这时候把结论写成「整件厚度安全」就是在替用户下不该下的判断。
+        if coverage >= 0.02:
+            tail = "整件厚度安全，未做全量扫描。"
+        elif coverage >= 0.005:
+            tail = f"未做全量扫描；本次只覆盖 {coverage * 100:.1f}% 的表面，局部薄壁仍可能漏检。"
+        else:
+            tail = (f"仅覆盖 {coverage * 100:.2f}% 的表面，局部薄壁漏检风险较高；"
+                    "需要确切结论请把壁厚采样面数调大后重测。")
         return _item("thickness", "壁厚", "ok",
-                     f"粗筛未发现低于 {limit:.1f}mm 的薄壁（600 面采样），整件厚度安全，未做全量扫描。",
+                     f"粗筛未发现低于 {limit:.1f}mm 的薄壁（{sampled} 面采样）。{tail}",
                      quick)
     # 全量阶段截断射线：只要判定「比告警线厚」就够了，不必扫穿整个模型
     # 全量阶段同样截断：超过 2mm 都算安全，没必要扫穿整个模型
@@ -830,8 +1047,9 @@ def check_thickness(mesh, params, ctx=None) -> dict:
 
 def check_nonmanifold(mesh, params, ctx=None) -> dict:
     verts, faces = np.asarray(mesh.vertices), np.asarray(mesh.faces)
-    h = edge_histogram(faces, len(verts))
-    dup = duplicate_face_count(faces)
+    # 与水密性检测共用同一份边直方图/重复面计数
+    h = _mesh_memo(mesh, "edges", lambda: edge_histogram(faces, len(verts)))
+    dup = _mesh_memo(mesh, "dup", lambda: duplicate_face_count(faces))
     if h["nonmanifold"] == 0 and dup == 0:
         return _item("nonmanifold", "非流形边", "ok", "没有一条边被超过两个面共享。", {"count": 0})
     parts = []
@@ -874,7 +1092,10 @@ def check_components(mesh, params, ctx=None) -> dict:
     """
     verts = np.asarray(mesh.vertices, dtype=np.float64)
     faces = np.asarray(mesh.faces)
-    info = classify_components(verts, faces, float(params.get("small_ratio", 0.01)))
+    ratio = sanitize_small_ratio(params.get("small_ratio", 0.01))
+    # 复用「法线」检测已经算好的连通分量标签，省一次 connected_components
+    _n, labels = _mesh_memo(mesh, "labels", lambda: union_components(faces, len(verts)))
+    info = classify_components(verts, faces, ratio, labels=labels)
     n = info["components"]
     if n <= 1:
         return _item("components", "孤立面片", "ok", "模型是单一连通体。", {"components": n})
@@ -888,10 +1109,13 @@ def check_components(mesh, params, ctx=None) -> dict:
     if cavities:
         msg += f" 其中 {cavities} 个是实体内部的内腔，不会被当成碎屑。"
     if tiny:
-        msg += f" 其中 {tiny} 个是碎屑（面积不足主件 1%，或负体积但不在实体内），建议清理。"
+        # 阈值是可配置的，文案不能写死 1%
+        msg += (f" 其中 {tiny} 个是碎屑（面积不足主件的 {ratio * 100:g}%，"
+                "或负体积但不在实体内），建议清理。")
     clean_sizes = [{k: v for k, v in s.items()} for s in sizes[:8]]
     return _item("components", "孤立面片", sev, msg,
-                 {"components": n, "sizes": clean_sizes, "tiny": tiny, "cavities": cavities},
+                 {"components": n, "sizes": clean_sizes, "tiny": tiny, "cavities": cavities,
+                  "small_ratio": ratio},
                  fix={"action": "remove_small", "label": "移除碎屑"} if tiny else None)
 
 
@@ -899,11 +1123,18 @@ def check_units(mesh, params, ctx=None) -> dict:
     ext = getattr(mesh, "extents", None)
     res = infer_units(ext)
     sev = "ok" if res["unit"] == "mm" else ("error" if res["unit"] == "oversize" else "warning")
-    if res["unit"].endswith("?"):
+    if res["unit"].endswith("?") or res.get("ambiguous"):
         sev = "info"
-    return _item("units", "单位与尺寸", sev, res["message"], res,
-                 fix=({"action": "rescale", "label": f"按 ×{res['scale']:.4g} 换算", "factor": res["scale"]}
-                      if abs(res["scale"] - 1) > 1e-9 else None))
+    # 二义时不给「一键 ×1000」的强建议：微缩件被放大 1000 倍比不提示更糟。
+    # 只在结论明确（或用户可从候选中选）时才带修复动作。
+    fix = None
+    if abs(res["scale"] - 1) > 1e-9:
+        if res.get("ambiguous"):
+            fix = {"action": "rescale", "label": f"按 ×{res['scale']:.4g} 换算（需先确认单位）",
+                   "factor": res["scale"], "needs_confirmation": True}
+        else:
+            fix = {"action": "rescale", "label": f"按 ×{res['scale']:.4g} 换算", "factor": res["scale"]}
+    return _item("units", "单位与尺寸", sev, res["message"], res, fix=fix)
 
 
 # ---------------------------------------------------------------- 热力图场
@@ -1054,12 +1285,29 @@ def quality_score(report: dict) -> dict:
     it = items.get("thickness") or {}
     v = it.get("value") or {}
     mn = v.get("min")
+    degraded: list[str] = []
+    caveats: list[str] = []
     if mn is None:
-        t_score = 12.0
-        note = "未测出"
+        t_score = 0.0
+        note = "未能测量（射线求交失败或全部未命中）"
+        degraded.append("壁厚未能测量")
+    elif v.get("degraded"):
+        t_score = 0.0
+        note = "测量降级，数值不可信"
+        degraded.append("壁厚测量降级")
     elif v.get("lower_bound"):
-        t_score = 20.0
-        note = f"最薄 ≥ {float(mn):.2f}mm（下限）"
+        # 粗筛只说明「采样到的面都不薄」，覆盖面越小这个结论越弱。
+        # 旧实现无条件给满分：20 万面模型只测 600 面（0.3%）也拿 20/20。
+        cov = float(v.get("coverage") or 0.0)
+        if cov >= 0.02:
+            t_score = 20.0
+        elif cov >= 0.005:
+            t_score = 16.0
+        else:
+            t_score = 12.0
+        note = f"最薄 ≥ {float(mn):.2f}mm（粗筛，覆盖 {cov * 100:.2f}% 表面）"
+        if cov < 0.005:
+            caveats.append(f"壁厚只做了粗筛（覆盖 {cov * 100:.2f}% 表面），局部薄壁可能漏检")
     else:
         mn = float(mn)
         t_score = 20 if mn >= 1.5 else 14 if mn >= 0.8 else 7 if mn >= 0.4 else 0
@@ -1073,8 +1321,17 @@ def quality_score(report: dict) -> dict:
     add("流形性", max(0, 15 - min(15, c + dup * 3)), 15, f"非流形边 {c}，重复面 {dup}")
 
     it = items.get("self_intersection") or {}
-    c = int((it.get("value") or {}).get("count") or 0)
-    add("自交", 10 if c == 0 else max(0, 10 - min(10, c / 5)), 10, f"穿插 {c} 处")
+    si_val = it.get("value") or {}
+    c = int(si_val.get("count") or 0)
+    si_note = f"穿插 {c} 处"
+    if si_val.get("count_is_lower_bound") or si_val.get("sampled"):
+        # 采样过就是下限，不能说「只有 N 处」
+        si_note = f"穿插 ≥ {c} 处（候选对超上限，已采样）"
+        degraded.append("自交检测已采样，结果为下限")
+    if si_val.get("error"):
+        si_note = "检测失败，结果不可信"
+        degraded.append("自交检测失败")
+    add("自交", 10 if c == 0 else max(0, 10 - min(10, c / 5)), 10, si_note)
 
     it = items.get("components") or {}
     n = int((it.get("value") or {}).get("components") or 1)
@@ -1084,16 +1341,28 @@ def quality_score(report: dict) -> dict:
     u = str((it.get("value") or {}).get("unit") or "unknown")
     add("单位", 5 if u == "mm" else (3 if u.endswith("?") else 1), 5, u)
 
+    # 任何一项检测失败/降级，都不允许给出「可以直接打印」的结论。
+    # 之前壁厚测不出来只扣 8 分，总分 92 仍判 A，等于用「没测到」冒充「没问题」。
+    failed = [i for i in (report.get("items") or []) if (i.get("value") or {}).get("error")]
+    for i in failed:
+        degraded.append(f"{i.get('name')} 检测失败")
+
     total = sum(p["score"] for p in parts)
     grade = "A" if total >= 90 else "B" if total >= 75 else "C" if total >= 60 else "D"
+    if degraded and grade in ("A", "B"):
+        # 上限降到 C：不确定就不给「可以打印」的结论，但也不假装几何有多差
+        grade = "C"
     verdict = {
         "A": "可以直接打印",
         "B": "小问题，建议修一下再打",
-        "C": "有明显缺陷，修完再打成功率更高",
+        "C": "有明显缺陷，修完再打成功率更高" if not degraded
+             else "有项目未能确认（" + "、".join(degraded[:3]) + "），建议先补测再打",
         "D": "问题严重，直接打大概率失败",
     }[grade]
     return {"score": round(total, 1), "grade": grade, "verdict": verdict,
-            "parts": parts, "max": 100}
+            "parts": parts, "max": 100,
+            "degraded": degraded, "caveats": caveats,
+            "confidence": "low" if degraded else "normal"}
 
 
 def component_field(mesh) -> dict:
@@ -1128,6 +1397,26 @@ CHECKS = [
     check_units,
 ]
 
+# 检测项 id / 显示名，供异常兜底时生成占位结论（顺序与 CHECKS 一一对应）
+CHECK_IDS = {
+    "check_watertight": "watertight",
+    "check_normals": "normals",
+    "check_thickness": "thickness",
+    "check_nonmanifold": "nonmanifold",
+    "check_self_intersection": "self_intersection",
+    "check_components": "components",
+    "check_units": "units",
+}
+CHECK_LABELS = {
+    "check_watertight": "水密性",
+    "check_normals": "法线",
+    "check_thickness": "壁厚",
+    "check_nonmanifold": "非流形边",
+    "check_self_intersection": "自相交",
+    "check_components": "孤立面片",
+    "check_units": "单位与尺寸",
+}
+
 
 # ---------------------------------------------------------------- 任务
 def summarize(items: list[dict]) -> dict:
@@ -1136,12 +1425,17 @@ def summarize(items: list[dict]) -> dict:
         counts[it["severity"]] = counts.get(it["severity"], 0) + 1
     worst = max((it["severity"] for it in items), key=lambda s: SEV_ORDER[s], default="ok")
     actionable = [it["id"] for it in items if it.get("fix")]
+    # 检测失败/降级要和「真的没问题」区分开：前端据此显示「有项目未确认」
+    degraded = [it["id"] for it in items
+                if (it.get("value") or {}).get("degraded") or (it.get("value") or {}).get("error")]
     return {
         "total": len(items),
         "counts": counts,
         "worst": worst,
         "actionable": actionable,
         "blocking": counts["error"] > 0,
+        "degraded": degraded,
+        "confidence": "low" if degraded else "normal",
     }
 
 
@@ -1171,10 +1465,7 @@ def run_job(ctx, params):
             todo.append(i)
 
     def work(i: int) -> tuple[int, dict]:
-        t0 = time.time()
-        it = CHECKS[i](mesh, params, None)
-        it["elapsed"] = round(time.time() - t0, 3)
-        return i, it
+        return i, _safe_check(CHECKS[i], mesh, params)
 
     # 七项检测彼此独立，线程池并行——耗时从「七项之和」压到「最慢的那项」
     done = len(CHECKS) - len(todo)
@@ -1198,10 +1489,36 @@ def run_job(ctx, params):
         "items": final_items,
         "summary": summary,
         "quality": quality_score({"items": final_items, "stats": stats}),
+        "failed_checks": [i.get("id") for i in final_items if (i.get("value") or {}).get("error")],
     }
     store.update(pid, analysis=report)
     ctx.tick(1.0, "检测完成", "done")
     return {"report": report}
+
+
+def _safe_check(fn, mesh, params: dict) -> dict:
+    """单项检测异常不得拖垮整份报告。
+
+    七项检测里任何一项抛异常（外部参数非法、几何极端、第三方库边界），
+    旧实现会让整个任务 failed：用户拿不到其余六项结论，也看不到到底哪项坏了。
+    这里把异常收成一条 info 级结论，并在 value 里留 error 字段，
+    质量评分据此把等级封顶（见 quality_score）。
+    """
+    t0 = time.time()
+    try:
+        it = fn(mesh, params, None)
+        it["elapsed"] = round(time.time() - t0, 3)
+        return it
+    except Exception as e:  # noqa: BLE001
+        name = CHECK_LABELS.get(fn.__name__, fn.__name__)
+        it = _item(
+            CHECK_IDS.get(fn.__name__, fn.__name__), name, "info",
+            f"这项检测没能完成（{type(e).__name__}: {str(e)[:120]}），"
+            "其余检测不受影响；该项目的结论需要人工确认。",
+            {"error": f"{type(e).__name__}: {str(e)[:200]}", "degraded": True},
+        )
+        it["elapsed"] = round(time.time() - t0, 3)
+        return it
 
 
 def analyze_mesh(mesh, path, params: dict | None = None) -> dict:
@@ -1217,7 +1534,7 @@ def analyze_mesh(mesh, path, params: dict | None = None) -> dict:
     # 七项检测彼此独立，线程池并行，耗时压到「最慢那一项」
     workers = min(4, len(CHECKS))
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="rechk") as ex:
-        items = list(ex.map(lambda fn: fn(mesh, params, None), CHECKS))
+        items = list(ex.map(lambda fn: _safe_check(fn, mesh, params), CHECKS))
     summary = summarize(items)
     return {
         "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1226,4 +1543,5 @@ def analyze_mesh(mesh, path, params: dict | None = None) -> dict:
         "items": items,
         "summary": summary,
         "quality": quality_score({"items": items, "stats": stats}),
+        "failed_checks": [i.get("id") for i in items if (i.get("value") or {}).get("error")],
     }

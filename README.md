@@ -234,7 +234,7 @@ TPF_OVERHANG_DEG=45        # 悬垂角阈值
 | # | 方向 | 改动 | 效果 |
 |---|---|---|---|
 | 1 | 正确性 | 壁厚多方向采样（法线 ±20°） | 曲面/楔形处不再高估 |
-| 2 | 正确性 | 自交候选半径用 99 分位 + 包围盒封顶 | 大小件混排时不再漏检 |
+| 2 | 正确性 | 自交候选半径从固定值改为 99 分位 + 包围盒封顶 | 当时解决了候选爆炸，但引入了漏检（见 ROUNDS.md 第 20 轮：改为两层半径，无分位数近似） |
 | 3 | 性能 | ASCII STL 分块正则 + fromiter | 288ms → 85ms |
 | 4 | 健壮性 | 补洞后自检，补坏则回退 | 不再产生非流形边 |
 | 5 | 正确性 | 法线按连通体分别定向 | 多实体一正一反能修对 |
@@ -366,24 +366,33 @@ TPF_OVERHANG_DEG=45        # 悬垂角阈值
 | 打孔布尔运算失败 | 输入非流形 | 先跑「体素重网格消解自交」再做镂空 |
 | 检测很慢 | 大模型 + 高采样 | 调低壁厚采样面数；厚模型会自动走粗筛快速通道 |
 | 内存持续上涨 | 缓存累积 | 降低 `TPF_MEMORY_LIMIT_MB`，缓存会按预算自动释放 |
-| 3D 预览空白 | 离线环境拿不到 CDN | 其余功能不受影响；要离线预览可把 three.js 放到 `static/vendor/` |
+| 3D 预览空白 | 本地 three.js 缺失且拿不到 CDN | 仓库已内置 `static/vendor/three.module.min.js`；缺失时其余功能不受影响，补回该文件即可离线预览 |
 | 任务卡在「等待内存资源」 | 进程占用超过上限 | 等前序任务结束，或调高上限 / 减少并发 |
 
 ## 测试
 
 ```bash
-.venv/Scripts/python.exe -m pytest tests/ -q     # 223 项单元测试
-.venv/Scripts/python.exe tests/e2e.py            # 47 项端到端检查
-.venv/Scripts/python.exe tests/ui_smoke.py       # 浏览器冒烟 + 截图（需先启动服务）
-.venv/Scripts/python.exe tests/bench.py          # 性能基准
+.venv/Scripts/python.exe -m pytest tests -q        # 143 项单元测试（实测）
+.venv/Scripts/python.exe bench\round_gate.py      # 28 项几何闸门，约 1.3s
+.venv/Scripts/python.exe bench\probe_tritri.py     # 三角-三角精确判定探针 10/10
+.venv/Scripts/python.exe bench\run.py              # 性能基准（44 个阶段）
 ```
 
-端到端覆盖：缺陷模型 → 检测 → 修复 → 复检 → 处理 → 预览 → 建议 → 四类导出 → 批量 → 失败归因 → 暂停/恢复/中断 → 断点续跑 → 配置与模板。
+| 测试文件 | 用例数 | 覆盖 |
+|---|---:|---|
+| `tests/test_repair.py` | 47 | 补洞/法线/碎屑/重网格的几何量断言（开放边、非流形、重复面、体积） |
+| `tests/test_printer_presets.py` | 34 | 20 款机型预设、参数建议、导入自检 |
+| `tests/test_rounds_20_40.py` | 27 | 第 20–40 轮迭代的逐轮回归（自交候选完整性、补丁穿插、薄片、评分封顶、接口校验、并发、缓存隔离） |
+| `tests/test_rounds_41_61.py` | 28 | 第 41–61 轮迭代的逐轮回归（未成环边、壁厚覆盖率、补洞纠朝向、打孔过滤、支撑间距、减面回退、桩位、点到面口径、孤立顶点、批量归因） |
+| `tests/test_optimizations.py` | 7 | 性能优化回归（支撑密度向量化等价、镂空统计量、单次体素化流水线、预览解析复用、缓存清理、装配 AABB 预筛、布尔失败降级） |
 
-CI 在 GitHub Actions 上跑 3.11 / 3.12 双版本，包含单元测试、端到端和服务冒烟启动。
+`bench/round_gate.py` 是每轮迭代的入口闸门：不依赖 pytest，直接对确定性夹具断言
+几何量，失败退出码 1。当前 28/28。
 
-覆盖率：`pytest tests/ --cov=app --cov-report=term-missing`，当前 78%（advisor 95%、analysis 92%、
-split 92%；batch 50% 和 pack 41% 偏低，主要是 run_job 依赖完整任务上下文，靠端到端覆盖）。
+**没有的东西不写在这里**：仓库不含 GitHub Actions 工作流，也不含 `tests/e2e.py` /
+`tests/ui_smoke.py` / `tests/bench.py`——历史上 README 声称过这些（223 项测试、47 项端到端、
+CI 双版本），实测都不存在，已按实际内容改正。覆盖率数字同理，需要时自行跑
+`pytest --cov=app`，不要引用旧值。
 
 ## 已知限制
 
@@ -392,7 +401,7 @@ split 92%；batch 50% 和 pack 41% 偏低，主要是 run_job 依赖完整任务
 - 体素法操作（镂空/加厚/重网格）会让锐边轻微圆化，精度受 pitch 限制。重网格/加厚重建后会补一遍 Taubin λ|μ 平滑，抹掉 marching cubes 的台阶纹（实测相邻面夹角波动降低约一半、体积基本不变），代价是极锐的棱会再圆一点。
 - 自交检测用 KD 树取局部候选对，理论上是近似检测——但实际模型的自交都是局部的。
 - 支撑是直柱，没有树状支撑和接触点细化，复杂件仍建议在切片软件里再调。
-- 3D 预览从 CDN 加载 Three.js，离线环境会降级成提示文字，其余功能不受影响。
+- 3D 预览优先用内置的 `static/vendor/three.module.min.js`，只有该文件缺失时才回退 CDN；两种来源都拿不到时降级成提示文字，其余功能不受影响。
 
 ## 开发断点管理
 

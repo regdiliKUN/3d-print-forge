@@ -174,6 +174,82 @@ def _job_out(job: jobs.Job) -> dict:
     return job.to_dict()
 
 
+# 接口层的数值区间表。修补/检测内部还有一层收敛（防御深度），但接口层必须先拦：
+# 越界值如果放进任务队列，用户看到的是「任务失败」，而不是「你填的 1e9 不合法」。
+_PARAM_RANGES: dict[str, tuple[float, float, str]] = {
+    "max_loop": (3, 2_000_000, "补洞最大环长"),
+    "fill_levels": (0, 4, "补洞细分级别"),
+    "fill_smooth": (0, 50, "补洞平滑次数"),
+    "small_ratio": (0.0, 0.5, "碎屑阈值（面积比）"),
+    "remesh_pitch": (0.01, 20.0, "重网格精度 mm"),
+    "remesh_smooth": (0, 20, "重网格平滑次数"),
+    "thicken_mm": (0.01, 100.0, "加厚量 mm"),
+    "thicken_smooth": (0, 20, "加厚平滑次数"),
+    "scale_factor": (1e-6, 1e6, "缩放系数"),
+    "sample_faces": (10, 200_000, "壁厚采样面数"),
+    # 处理链
+    "decimate_ratio": (0.02, 1.0, "减面比例"),
+    "wall_thickness": (0.2, 20.0, "壳厚 mm"),
+    "drain_holes": (0, 20, "排液孔数量"),
+    "hole_diameter": (0.5, 20.0, "孔径 mm"),
+    "support_diameter": (0.2, 5.0, "支撑直径 mm"),
+    "support_spacing": (0.5, 20.0, "支撑间距 mm"),
+    "overhang_deg": (20.0, 80.0, "悬垂角阈值"),
+    "scale": (0.05, 20.0, "整体缩放"),
+    "target_height": (0.0, 2000.0, "目标高度 mm"),
+    "target_max_dim": (0.0, 2000.0, "目标最大尺寸 mm"),
+    # 分件 / 拼盘 / 挖孔 / 旋转
+    "max_size": (10.0, 2000.0, "成型尺寸上限 mm"),
+    "platform_w": (10.0, 2000.0, "平台宽 mm"),
+    "platform_d": (10.0, 2000.0, "平台深 mm"),
+    "gap": (0.0, 100.0, "件间距 mm"),
+    "diameter": (0.5, 50.0, "直径 mm"),
+    "depth": (0.0, 1000.0, "深度 mm"),
+    "degrees": (-360.0, 360.0, "旋转角度"),
+}
+
+# 枚举型参数：拼错（"Auto"、"xy"、""）以前会被静默当成默认值或直接 500
+_ENUM_CHOICES: dict[str, set[str]] = {
+    "supports": {"none", "auto", "manual"},
+    "axis": {"auto", "x", "y", "z"},
+    "process": {"SLA", "FDM"},
+}
+
+
+def _checked_enum(payload: dict, key: str, allowed: set[str] | None = None) -> str | None:
+    """枚举参数校验；大小写不敏感（"Auto" 归一成 "auto"），拼错直接 422。"""
+    if key not in payload or payload[key] in (None, ""):
+        return None
+    raw = payload[key]
+    val = str(raw).strip().lower()
+    choices = allowed if allowed is not None else _ENUM_CHOICES[key]
+    if val not in choices:
+        raise HTTPException(422, f"{key} 只能是 {'/'.join(sorted(choices))}，收到 {raw!r}")
+    return val
+
+
+def _checked_params(payload: dict, keys) -> dict:
+    """按区间表校验并归一化入参，越界直接 422（而不是带病入队）。"""
+    import numpy as np  # 路由层延迟导入重型库，这里只用到标量判断
+
+    out: dict = {}
+    for key in keys:
+        if key not in payload or payload[key] in (None, ""):
+            continue
+        raw = payload[key]
+        lo, hi, label = _PARAM_RANGES[key]
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(422, f"{label}（{key}）必须是数字，收到 {raw!r}")
+        if not np.isfinite(val):
+            raise HTTPException(422, f"{label}（{key}）必须是有限数值，收到 {raw!r}")
+        if not (lo <= val <= hi):
+            raise HTTPException(422, f"{label}（{key}）超出允许范围 {lo:g} ~ {hi:g}，收到 {val:g}")
+        out[key] = val
+    return out
+
+
 def _spawn(kind: str, title: str, params: dict, worker, pid: str | None) -> dict:
     job = jobs.submit(kind, title, params, worker, pid)
     return _job_out(job)
@@ -588,12 +664,17 @@ def _support_density_field(mesh, radius: float = 6.0) -> dict:
     if not segs or len(v) == 0:
         return {"values": [0.0] * len(v), "max": 0, "unit": "根", "count": 0,
                 "direction": "higher_is_denser", "note": "没有生成支撑"}
-    pts = np.asarray([[x[0], x[1]] for x in segs], dtype=np.float64)
+    # 一次批量查询替代逐顶点 Python 循环：4 万顶点 × 每点一次 query_ball_point，
+    # 光解释器开销就占大头。return_length 只返回计数，不物化每个点的邻域列表。
+    pts = np.asarray(segs, dtype=np.float64)[:, :2]
     tree = cKDTree(pts)
-    counts = np.array([len(tree.query_ball_point(vv[:2], radius)) for vv in v], dtype=np.float64)
+    counts = tree.query_ball_point(
+        v[:, :2], radius, return_length=True,
+        workers=max(1, int(config.get().runtime.thread_workers or 1)),
+    ).astype(np.float64)
     mx = float(counts.max()) if counts.size else 0.0
     return {
-        "values": [round(float(x), 2) for x in counts],
+        "values": np.round(counts, 2).tolist(),
         "max": round(mx, 1),
         "unit": f"根/{radius:.0f}mm",
         "count": len(segs),
@@ -652,7 +733,7 @@ def analyze(pid: str, payload: dict = Body(default={})) -> dict:
     if not p:
         raise HTTPException(404, "项目不存在")
     params = {"sample_faces": 1500, "check_self_intersection": True}
-    params.update(payload or {})
+    params.update(_checked_params(payload or {}, ("sample_faces",)))
     return _spawn("analyze", f"检测 {p['name']}", params, analysis.run_job, pid)
 
 
@@ -673,13 +754,11 @@ def repair(pid: str, payload: dict = Body(...)) -> dict:
     # 动作参数必须原样透传：旧接口只转发 small_ratio，
     # 前端改加厚量/重网格精度/补洞细分时后端其实一直用默认值。
     params = {"actions": actions}
-    for key in (
+    params.update(_checked_params(payload, (
         "max_loop", "fill_levels", "fill_smooth", "small_ratio",
         "remesh_pitch", "remesh_smooth", "thicken_mm", "thicken_smooth",
         "scale_factor",
-    ):
-        if key in payload:
-            params[key] = payload[key]
+    )))
     params.setdefault("small_ratio", 0.01)
     return _spawn("repair", f"修复 {p['name']}", params, repair_mod.run_job, pid)
 
@@ -691,7 +770,16 @@ def process(pid: str, payload: dict = Body(...)) -> dict:
     p = store.get(pid)
     if not p:
         raise HTTPException(404, "项目不存在")
-    return _spawn("process", f"处理 {p['name']}", payload, process_mod.run_job, pid)
+    params = dict(payload or {})
+    params.update(_checked_params(payload, (
+        "decimate_ratio", "wall_thickness", "drain_holes", "hole_diameter",
+        "support_diameter", "support_spacing", "overhang_deg", "scale",
+        "target_height", "target_max_dim",
+    )))
+    sup = _checked_enum(payload, "supports")
+    if sup is not None:
+        params["supports"] = sup
+    return _spawn("process", f"处理 {p['name']}", params, process_mod.run_job, pid)
 
 
 @app.post("/api/projects/{pid}/split")
@@ -701,12 +789,42 @@ def split_project(pid: str, payload: dict = Body(...)) -> dict:
     p = store.get(pid)
     if not p:
         raise HTTPException(404, "项目不存在")
-    return _spawn("split", f"分件 {p['name']}", payload, split_mod.run_job, pid)
+    params = dict(payload or {})
+    params.update(_checked_params(payload, ("max_size",)))
+    axis = _checked_enum(payload, "axis")
+    if axis is not None:
+        params["axis"] = axis
+    if float(params.get("max_size") or 0) <= 0:
+        raise HTTPException(422, "max_size 必须大于 0（成型尺寸上限，单位 mm）")
+    return _spawn("split", f"分件 {p['name']}", params, split_mod.run_job, pid)
+
+
+def _resize_factors(cur: list[float], targets: dict, lock: bool) -> list[float]:
+    """算出三轴缩放系数。
+
+    `lock_ratio=True` 时，旧实现用 `max(targets) / max(cur)` 当统一系数：
+    模型 100×80×200、用户只填「宽度 50」，会被算成 50/200 = 0.25，
+    宽度变成 25——用户填的数字和结果对不上，而且轴选得越「不对」错得越离谱。
+    等比缩放必须以「用户指定那根轴」为基准：第一个填了的轴决定系数。
+    """
+    keys = ("width", "depth", "height")
+    if lock:
+        for i, k in enumerate(keys):
+            v = targets.get(k)
+            if v and cur[i] > 0:
+                f = float(v) / cur[i]
+                return [f, f, f]
+        return [1.0, 1.0, 1.0]
+    out = []
+    for i, k in enumerate(keys):
+        v = targets.get(k)
+        out.append(float(v) / cur[i] if v and cur[i] > 0 else 1.0)
+    return out
 
 
 @app.post("/api/projects/{pid}/resize")
 def resize_project(pid: str, payload: dict = Body(...)) -> dict:
-    """按目标尺寸缩放。lock_ratio=True 以最长边为准等比，否则三轴各自独立。"""
+    """按目标尺寸缩放。lock_ratio=True 以指定那根轴为准等比，否则三轴各自独立。"""
 
     from . import meshio
 
@@ -716,29 +834,35 @@ def resize_project(pid: str, payload: dict = Body(...)) -> dict:
     src = Path(p.get("current") or p.get("source") or "")
     if not src.exists():
         raise HTTPException(404, "模型文件不存在")
-    mesh = meshio.load_mesh(src)
+    mesh = meshio.load_mesh(src, mutable=True)
     cur = [float(x) for x in mesh.extents]
     if min(cur) <= 1e-9:
         raise HTTPException(400, "模型尺寸为零，无法缩放")
 
-    tw = payload.get("width")
-    td = payload.get("depth")
-    th = payload.get("height")
-    targets = [float(x) for x in (tw, td, th) if x and float(x) > 0]
+    raw = {"width": payload.get("width"), "depth": payload.get("depth"),
+           "height": payload.get("height")}
+    targets: dict[str, float] = {}
+    for k, v in raw.items():
+        if v in (None, ""):
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            raise HTTPException(422, f"目标尺寸 {k} 必须是数字，收到 {v!r}")
+        if not (0.01 <= fv <= 10000):
+            raise HTTPException(422, f"目标尺寸 {k} 超出允许范围 0.01 ~ 10000mm，收到 {fv:g}")
+        targets[k] = fv
     if not targets:
         raise HTTPException(400, "至少给一个目标尺寸")
 
     lock = bool(payload.get("lock_ratio", True))
+    factors = _resize_factors(cur, targets, lock)
     if lock:
-        factor = max(targets) / max(cur)
-        mesh.apply_scale(factor)
-        applied = [round(factor, 4)] * 3
+        mesh.apply_scale(factors[0])
+        applied = [round(factors[0], 4)] * 3
     else:
-        fx = float(tw) / cur[0] if tw and float(tw) > 0 else 1.0
-        fy = float(td) / cur[1] if td and float(td) > 0 else 1.0
-        fz = float(th) / cur[2] if th and float(th) > 0 else 1.0
-        mesh.apply_scale([fx, fy, fz])
-        applied = [round(fx, 4), round(fy, 4), round(fz, 4)]
+        mesh.apply_scale(factors)
+        applied = [round(f, 4) for f in factors]
 
     mesh.apply_translation([0, 0, -float(mesh.bounds[0][2])])
     out = config.OUTPUTS / f"{pid}_resize_{int(_time.time())}.stl"
@@ -760,7 +884,7 @@ def center_project(pid: str) -> dict:
     src = Path(p.get("current") or p.get("source") or "")
     if not src.exists():
         raise HTTPException(404, "模型文件不存在")
-    mesh = meshio.load_mesh(src)
+    mesh = meshio.load_mesh(src, mutable=True)
     lo, hi = mesh.bounds
     cx = float((lo[0] + hi[0]) / 2)
     cy = float((lo[1] + hi[1]) / 2)
@@ -886,10 +1010,10 @@ def bore_holes(pid: str, payload: dict = Body(...)) -> dict:
     pts = payload.get("points")
     if not isinstance(pts, list) or not pts:
         raise HTTPException(400, "需要 points 数组")
-    diameter = float(payload.get("diameter", 3.0))
-    if diameter <= 0:
-        raise HTTPException(400, "孔径必须大于 0")
-    depth = float(payload.get("depth", 0.0))
+    # 孔径/深度走统一的区间校验：字符串会变成清晰的 422，而不是 500
+    _bore = _checked_params(payload, ("diameter", "depth"))
+    diameter = float(_bore.get("diameter", 3.0))
+    depth = float(_bore.get("depth", 0.0))
     direction = np.asarray(payload.get("direction") or [0, 0, -1], dtype=np.float64)
     dn = float(np.linalg.norm(direction))
     if dn < 1e-9:
@@ -1129,12 +1253,12 @@ def rotate_project(pid: str, payload: dict = Body(...)) -> dict:
     path = p.get("current") or p.get("source")
     if not path or not Path(path).exists():
         raise HTTPException(404, "模型文件不存在")
-    axis = str(payload.get("axis", "z")).lower()
-    deg = float(payload.get("degrees", 90))
+    axis = _checked_enum(payload, "axis", {"x", "y", "z"}) or "z"
+    deg = float(_checked_params(payload, ("degrees",)).get("degrees", 90.0))
     vec = {"x": [1, 0, 0], "y": [0, 1, 0], "z": [0, 0, 1]}.get(axis)
     if vec is None:
         raise HTTPException(400, "axis 只能是 x / y / z")
-    mesh = meshio.load_mesh(Path(path))
+    mesh = meshio.load_mesh(Path(path), mutable=True)
     T = trimesh.transformations.rotation_matrix(np.radians(deg), vec)
     mesh.apply_transform(T)
     mesh.apply_translation([0, 0, -float(mesh.bounds[0][2])])
@@ -1166,12 +1290,14 @@ def project_issues(pid: str) -> dict:
     v = np.asarray(mesh.vertices, dtype=np.float64)
     f = np.asarray(mesh.faces)
 
+    degraded: list[dict] = []
+
     holes: list = []
     try:
         for ring in repair.boundary_loops(f, len(v)):
             holes.append([round(float(x), 2) for x in v[ring].mean(axis=0)])
-    except Exception:
-        pass
+    except Exception as exc:
+        degraded.append({"check": "holes", "reason": f"{type(exc).__name__}: {exc}"[:300]})
 
     self_int: list = []
     try:
@@ -1180,26 +1306,29 @@ def project_issues(pid: str) -> dict:
             pr = np.asarray(res["pairs"])
             centers = v[f[pr[:, 0]]].mean(axis=1)
             self_int = [[round(float(x), 2) for x in c] for c in centers[:150]]
-    except Exception:
-        pass
+    except Exception as exc:
+        degraded.append({"check": "self_intersection",
+                         "reason": f"{type(exc).__name__}: {exc}"[:300]})
 
     debris: list = []
     try:
         n, labels = analysis.union_components(f, len(v))
         if n > 1:
             areas = analysis.tri_areas(v, f)
-            comp = np.array([areas[labels == c].sum() for c in range(n)])
+            # 逐分量做布尔掩码是 O(分量数 × 面数)；bincount 一次汇总所有分量
+            comp = np.bincount(labels, weights=areas, minlength=n)
             mx = float(comp.max())
             for c in range(n):
                 if comp[c] < mx * 0.01:
                     debris.append([round(float(x), 2) for x in v[f[labels == c]].reshape(-1, 3).mean(axis=0)])
-    except Exception:
-        pass
+    except Exception as exc:
+        degraded.append({"check": "debris", "reason": f"{type(exc).__name__}: {exc}"[:300]})
 
     return {
         "holes": holes,
         "self_intersection": self_int,
         "debris": debris,
+        "degraded": degraded,
         "counts": {"holes": len(holes), "self_intersection": len(self_int), "debris": len(debris)},
     }
 
@@ -1239,7 +1368,10 @@ def preview_supports(pid: str, payload: dict = Body(default={})) -> dict:
 def pack_models(pid: str, payload: dict = Body(...)) -> dict:
     from . import pack as pack_mod
 
-    return _spawn("pack", "拼盘排版", payload, pack_mod.run_job, pid)
+    params = dict(payload or {})
+    # 平台尺寸传 NaN 时，所有比较都是 False，件会被排到 NaN 坐标并导出成非法 STL
+    params.update(_checked_params(payload, ("platform_w", "platform_d", "gap")))
+    return _spawn("pack", "拼盘排版", params, pack_mod.run_job, pid)
 
 
 @app.get("/api/projects/{pid}/diff")
@@ -1459,7 +1591,13 @@ def project_param_history(pid: str) -> dict:
 
 @app.post("/api/projects/{pid}/check-assembly")
 def check_assembly(pid: str, payload: dict = Body(default={})) -> dict:
-    """检查分件各块摆回原位后是否互相干涉（重叠体积 > 0.5mm³ 即报警）。"""
+    """检查分件各块摆回原位后是否互相干涉（重叠体积 > 0.5mm³ 即报警）。
+
+    先用包围盒粗筛：分件通常沿 Z 切开，绝大多数块在空间上根本不相邻，
+    没必要为每一对都跑一次昂贵的布尔求交。布尔失败时记录 degraded，
+    不能像旧版那样把「算不出来」当成「没有干涉」。
+    """
+    import numpy as np
     import trimesh
 
     from . import meshio
@@ -1478,7 +1616,7 @@ def check_assembly(pid: str, payload: dict = Body(default={})) -> dict:
         fp = Path(f)
         if not fp.exists():
             continue
-        m = meshio.load_mesh(fp)
+        m = meshio.load_mesh(fp, mutable=True)
         cur = m.bounds.mean(axis=0)
         m.apply_translation([float(off[0]) - float(cur[0]),
                              float(off[1]) - float(cur[1]),
@@ -1489,32 +1627,58 @@ def check_assembly(pid: str, payload: dict = Body(default={})) -> dict:
         return {"ok": True, "interferences": [], "parts": len(meshes),
                 "note": "少于两块，无需检查"}
 
+    bounds = [np.asarray(m.bounds, dtype=np.float64) for m in meshes]
     interferences = []
+    degraded = []
+    total_pairs = 0
     checked = 0
+    skipped = 0
     for i in range(len(meshes)):
         for j in range(i + 1, len(meshes)):
+            total_pairs += 1
+            # 包围盒不相交 → 实体不可能相交，直接跳过布尔运算
+            if not (np.all(bounds[i][0] <= bounds[j][1])
+                    and np.all(bounds[j][0] <= bounds[i][1])):
+                skipped += 1
+                continue
             checked += 1
             vol = 0.0
             try:
                 inter = trimesh.boolean.intersection([meshes[i], meshes[j]], engine="manifold")
                 if inter is not None and len(inter.faces) > 0:
                     vol = abs(float(inter.volume))
-            except Exception:
-                vol = 0.0
+            except Exception as exc:
+                # 失败不等于无干涉：交给上层显示「未确认」，避免给出错误的安全结论
+                degraded.append({
+                    "a": i + 1, "b": j + 1,
+                    "name_a": names[i], "name_b": names[j],
+                    "reason": f"{type(exc).__name__}: {exc}"[:300],
+                })
             if vol > tol:
                 interferences.append({
                     "a": i + 1, "b": j + 1,
                     "name_a": names[i], "name_b": names[j],
                     "volume_mm3": round(vol, 1),
                 })
+    ok = not interferences and not degraded
+    if interferences:
+        note = f"{len(interferences)} 对存在干涉，装配时会顶住"
+        if degraded:
+            note += f"；另有 {len(degraded)} 对布尔运算失败，未能确认"
+    elif degraded:
+        note = f"{len(degraded)} 对包围盒相交但布尔运算失败，无法确认是否干涉"
+    else:
+        note = f"{total_pairs} 对组合全部无干涉（包围盒粗筛后实际求交 {checked} 对）"
     return {
-        "ok": not interferences,
+        "ok": ok,
         "parts": len(meshes),
-        "pairs_checked": checked,
+        "pairs_checked": total_pairs,
+        "pairs_geometry_checked": checked,
+        "pairs_skipped_by_aabb": skipped,
         "interferences": interferences,
+        "degraded": degraded,
         "tolerance_mm3": tol,
-        "note": (f"{checked} 对组合全部无干涉" if not interferences
-                 else f"{len(interferences)} 对存在干涉，装配时会顶住"),
+        "note": note,
     }
 
 
@@ -1542,7 +1706,7 @@ def project_assembly(pid: str) -> dict:
         fp = Path(f)
         if not fp.exists():
             continue
-        m = meshio.load_mesh(fp)
+        m = meshio.load_mesh(fp, mutable=True)
         # 分件时每块被移到 z=0，中心从「原始中心」变成了「h/2」。
         # 所以不能直接平移 off，要按「目标中心 - 当前中心」算差值。
         cur = m.bounds.mean(axis=0)

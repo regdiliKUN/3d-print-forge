@@ -165,12 +165,26 @@ def _coarsen_grid(grid: np.ndarray, vox, factor: int):
     return coarse_grid, types.SimpleNamespace(transform=t)
 
 
-def hollow_shell(mesh, wall: float, pitch: float | None = None,
-                 coarse: int = 2) -> tuple[trimesh.Trimesh, trimesh.Trimesh]:
-    """返回 (双层壳体, 内腔网格)。内腔法线保证朝内，合并后体积 = 外壳 - 内腔。"""
+def _inside_distance(mesh, pitch: float | None = None):
+    """栅格化 + 内部距离场。镂空和「预估省料体积」共用同一次 O(N³) 计算。"""
     grid, vox, p = to_grid(mesh, pitch)
     inside = ndi.distance_transform_edt(grid) * p
+    return inside, grid, vox, p
+
+
+def hollow_shell(mesh, wall: float, pitch: float | None = None,
+                 coarse: int = 2,
+                 stats: dict | None = None) -> tuple[trimesh.Trimesh, trimesh.Trimesh]:
+    """返回 (双层壳体, 内腔网格)。内腔法线保证朝内，合并后体积 = 外壳 - 内腔。
+
+    `stats` 非 None 时顺带写入 `cavity_mm3` / `pitch_mm`，让调用方不必再为
+    「省了多少料」单独跑一遍体素化 + EDT——同一张网格跑两遍是这里最大的浪费。
+    """
+    inside, _grid, vox, p = _inside_distance(mesh, pitch)
     inner_grid = inside > wall
+    if stats is not None:
+        stats["cavity_mm3"] = float(inner_grid.sum() * (p ** 3))
+        stats["pitch_mm"] = p
     if not inner_grid.any():
         raise ValueError(
             f"壳厚 {wall}mm 超过模型最薄处的一半，无法镂空。请减小壳厚或先加厚模型。"
@@ -193,8 +207,11 @@ def hollow_shell(mesh, wall: float, pitch: float | None = None,
 
 
 def cavity_volume(mesh, wall: float, pitch: float | None = None) -> float:
-    """预估镂空后可省下的体积（mm³）。"""
-    grid, vox, p = to_grid(mesh, pitch)
-    inside = ndi.distance_transform_edt(grid) * p
+    """预估镂空后可省下的体积（mm³）。
+
+    只算体积、不重建内腔时用它；如果紧接着还要 `hollow_shell`，应直接给
+    `hollow_shell(..., stats=...)`，别把距离场算两遍。
+    """
+    inside, _grid, _vox, p = _inside_distance(mesh, pitch)
     inner_grid = inside > wall
     return float(inner_grid.sum() * (p ** 3))

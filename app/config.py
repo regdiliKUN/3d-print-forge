@@ -3,11 +3,30 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "data"
+FROZEN = bool(getattr(sys, "frozen", False))
+
+
+def _root() -> Path:
+    """只读资源根：源码=项目根，打包=_MEIPASS（PyInstaller 解包目录）。"""
+    if FROZEN:
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)).resolve()
+    return Path(__file__).resolve().parent.parent
+
+
+def _base() -> Path:
+    """可写目录：源码=项目根，打包=EXE 所在目录，数据跟着程序包走。"""
+    if FROZEN:
+        return Path(sys.executable).resolve().parent
+    return _root()
+
+
+ROOT = _root()
+BASE = _base()
+DATA = Path(os.environ.get("TPF_DATA_DIR") or (BASE / "data")).resolve()
 UPLOADS = DATA / "uploads"
 OUTPUTS = DATA / "outputs"
 STATE = DATA / "state"

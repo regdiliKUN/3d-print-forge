@@ -20,14 +20,23 @@ class Viewer {
     this.el = el;
     this.ok = false;
     this.wire = false;
+    this._raf = 0;        // 按需渲染的帧句柄，dispose 时要取消
+    this._disposed = false;
     this._init();
   }
 
   async _init() {
-    try {
-      this.THREE = await import("https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js");
-    } catch {
-      this.el.innerHTML = '<div style="display:grid;place-items:center;height:100%;color:#5f6675;font-size:12px">3D 预览需要联网加载渲染库<br>其余功能不受影响</div>';
+    // 优先用随包分发的 Three.js（离线可用），丢了再退回 CDN。
+    // 旧版只走 CDN，断网时整个 3D 预览降级成一行提示，与「本地工具」的定位冲突。
+    const sources = [
+      new URL("./vendor/three.module.min.js", import.meta.url).href,
+      "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    ];
+    for (const src of sources) {
+      try { this.THREE = await import(src); break; } catch {}
+    }
+    if (!this.THREE) {
+      this.el.innerHTML = '<div style="display:grid;place-items:center;height:100%;color:#5f6675;font-size:12px">3D 预览渲染库未找到<br>其余功能不受影响</div>';
       return;
     }
     const T = this.THREE;
@@ -59,13 +68,15 @@ class Viewer {
     this.mat.clipShadows = false;
     this.boxHelper = null;
     this.markers = [];
+    this.markerGeo = null;
+    this.markerMats = [];
     this.labels = [];
 
     this.theta = 0.9; this.phi = 1.15; this.radius = 3; this.target = new T.Vector3();
     this._bind();
-    this._loop();
     this.ok = true;
     this.resize();
+    this._invalidate();
   }
 
   pick(ev) {
@@ -122,12 +133,14 @@ class Viewer {
         this.theta -= dx * 0.007;
         this.phi = Math.max(0.08, Math.min(Math.PI - 0.08, this.phi - dy * 0.007));
       }
+      this._invalidate();
     });
     c.addEventListener("pointerup", () => { drag = null; });
     c.addEventListener("contextmenu", (e) => e.preventDefault());
     c.addEventListener("wheel", (e) => {
       e.preventDefault();
       this.radius = Math.max(this.minR || 0.5, Math.min(this.maxR || 50, this.radius * (1 + Math.sign(e.deltaY) * 0.12)));
+      this._invalidate();
     }, { passive: false });
   }
 
@@ -160,6 +173,7 @@ class Viewer {
     this.camera.near = bs.radius * 0.01;
     this.camera.far = bs.radius * 40;
     this.camera.updateProjectionMatrix();
+    this._invalidate();
   }
 
   setVertexColors(colors) {
@@ -169,6 +183,7 @@ class Viewer {
     this.mat.vertexColors = true;
     this.mat.color.set(0xffffff);
     this.mat.needsUpdate = true;
+    this._invalidate();
   }
 
   setHeatmap(vals, kind) {
@@ -204,6 +219,7 @@ class Viewer {
     this.mat.vertexColors = true;
     this.mat.color.set(0xffffff);
     this.mat.needsUpdate = true;
+    this._invalidate();
   }
 
   clearHeatmap() {
@@ -211,12 +227,14 @@ class Viewer {
     this.mat.vertexColors = false;
     this.mat.color.set(0xb9c6d8);
     this.mat.needsUpdate = true;
+    this._invalidate();
   }
 
   setClip(t) {
     if (!this.ok || !this.box) return;
     const lo = this.box.min.y, hi = this.box.max.y;
     this.clipPlane.constant = t >= 1 ? hi + 1 : lo + (hi - lo) * t;
+    this._invalidate();
   }
 
   toggleBox() {
@@ -225,6 +243,7 @@ class Viewer {
     if (this.boxHelper) { this.clearBox(); return false; }
     this.boxHelper = new T.Box3Helper(this.box, 0x3f8f78);
     this.group.add(this.boxHelper);
+    this._invalidate();
     return true;
   }
 
@@ -232,27 +251,42 @@ class Viewer {
     if (this.boxHelper) {
       this.group.remove(this.boxHelper);
       this.boxHelper.geometry?.dispose?.();
+      this.boxHelper.material?.dispose?.();
       this.boxHelper = null;
+      this._invalidate();
     }
   }
 
-  markPoints(pts, color = 0xe24b4a) {
+  markPoints(pts, color = 0xe24b4a, append = false) {
     if (!this.ok) return;
     const T = this.THREE;
-    this.clearMarkers();
-    const geo = new T.SphereGeometry(Math.max(0.4, (this.box ? this.box.getSize(new T.Vector3()).length() : 20) * 0.006), 8, 8);
+    if (!append) this.clearMarkers();
+    if (!this.markerGeo) {
+      this.markerGeo = new T.SphereGeometry(
+        Math.max(0.4, (this.box ? this.box.getSize(new T.Vector3()).length() : 20) * 0.006), 8, 8,
+      );
+    }
     const mat = new T.MeshBasicMaterial({ color });
-    for (const p of pts.slice(0, 400)) {
-      const s = new T.Mesh(geo, mat);
+    this.markerMats.push(mat);
+    const room = Math.max(0, 400 - this.markers.length);
+    for (const p of pts.slice(0, room)) {
+      const s = new T.Mesh(this.markerGeo, mat);
       s.position.set(p[0], p[1], p[2]);
       this.group.add(s);
       this.markers.push(s);
     }
+    this._invalidate();
   }
 
   clearMarkers() {
     (this.markers || []).forEach((m) => this.group.remove(m));
     this.markers = [];
+    // 标记共用 geometry、按颜色分开 material，只 remove 不 dispose 会持续漏显存
+    this.markerGeo?.dispose?.();
+    (this.markerMats || []).forEach((m) => m.dispose?.());
+    this.markerGeo = null;
+    this.markerMats = [];
+    this._invalidate();
   }
 
   drawSegments(segs) {
@@ -270,6 +304,7 @@ class Viewer {
     const mat = new T.LineBasicMaterial({ color: 0xef9f27, transparent: true, opacity: 0.85 });
     this.segs = new T.LineSegments(g, mat);
     this.group.add(this.segs);
+    this._invalidate();
     return segs.length;
   }
 
@@ -277,7 +312,9 @@ class Viewer {
     if (this.segs) {
       this.group.remove(this.segs);
       this.segs.geometry?.dispose?.();
+      this.segs.material?.dispose?.();
       this.segs = null;
+      this._invalidate();
     }
   }
 
@@ -297,6 +334,7 @@ class Viewer {
     this.grid = new T.LineSegments(g, mat);
     // 加到 scene：平台在世界水平面，不该跟着模型转
     this.scene.add(this.grid);
+    this._invalidate();
     return true;
   }
 
@@ -329,6 +367,7 @@ class Viewer {
     geo.setAttribute("position", new T.Float32BufferAttribute(pts, 3));
     this.normals = new T.LineSegments(geo, new T.LineBasicMaterial({ color: 0x378add }));
     this.group.add(this.normals);
+    this._invalidate();
     return pts.length / 6;
   }
 
@@ -336,7 +375,9 @@ class Viewer {
     if (this.normals) {
       this.group.remove(this.normals);
       this.normals.geometry?.dispose?.();
+      this.normals.material?.dispose?.();
       this.normals = null;
+      this._invalidate();
     }
   }
 
@@ -361,6 +402,7 @@ class Viewer {
     }));
     this.section.renderOrder = 10;
     this.group.add(this.section);
+    this._invalidate();
     return paths.length;
   }
 
@@ -398,6 +440,7 @@ class Viewer {
     mk(`X ${size.x.toFixed(1)}`, [cx, min.y, min.z], "#378add");
     mk(`Y ${size.y.toFixed(1)}`, [max.x, cy, min.z], "#5dcaa5");
     mk(`Z ${size.z.toFixed(1)}`, [max.x, min.y, cz], "#ef9f27");
+    this._invalidate();
     return this.labels.length;
   }
 
@@ -408,13 +451,16 @@ class Viewer {
       l.material?.dispose?.();
     });
     this.labels = [];
+    this._invalidate();
   }
 
   clearSection() {
     if (this.section) {
       this.group.remove(this.section);
       this.section.geometry?.dispose?.();
+      this.section.material?.dispose?.();
       this.section = null;
+      this._invalidate();
     }
   }
 
@@ -423,7 +469,10 @@ class Viewer {
     const T = this.THREE;
     if (this.axes) {
       this.scene.remove(this.axes);
+      this.axes.geometry?.dispose?.();
+      this.axes.material?.dispose?.();
       this.axes = null;
+      this._invalidate();
       return false;
     }
     const size = this.box ? Math.max(this.box.getSize(new T.Vector3()).length() * 0.18, 5) : 20;
@@ -431,6 +480,7 @@ class Viewer {
     this.axes.material.depthTest = false;
     this.axes.renderOrder = 8;
     this.scene.add(this.axes);
+    this._invalidate();
     return true;
   }
 
@@ -438,13 +488,17 @@ class Viewer {
     if (this.grid) {
       this.scene.remove(this.grid);
       this.grid.geometry?.dispose?.();
+      this.grid.material?.dispose?.();
       this.grid = null;
+      this._invalidate();
     }
   }
 
   toggleWire() {
     this.wire = !this.wire;
     this.mat.wireframe = this.wire;
+    this.mat.needsUpdate = true;
+    this._invalidate();
     return this.wire;
   }
 
@@ -455,12 +509,17 @@ class Viewer {
     this.renderer.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    this._invalidate();
   }
 
-  _loop() {
-    const T = this.THREE;
-    const tick = () => {
-      requestAnimationFrame(tick);
+  /** 按需渲染：只有视角、几何或标注真的变了才画下一帧。
+   *  旧实现无条件 requestAnimationFrame + render，静止时也每秒 60 次重绘，
+   *  持续吃 GPU/电池；不过滤的话浏览器切到后台也不会停。 */
+  _invalidate() {
+    if (this._disposed || !this.ok || this._raf) return;
+    this._raf = requestAnimationFrame(() => {
+      this._raf = 0;
+      if (this._disposed || !this.ok) return;
       const sp = Math.sin(this.phi), cp = Math.cos(this.phi);
       this.camera.position.set(
         this.target.x + this.radius * sp * Math.cos(this.theta),
@@ -469,13 +528,52 @@ class Viewer {
       );
       this.camera.lookAt(this.target);
       this.renderer.render(this.scene, this.camera);
-    };
-    tick();
+    });
   }
 
   dispose() {
-    if (this.renderer) { this.renderer.dispose(); this.renderer.domElement.remove(); }
+    if (this._disposed) return;
+    this._disposed = true;
     this.ok = false;
+    if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0; }
+    // 先走各 clear 方法（它们会 remove），再统一释放残留的 geometry/material/texture。
+    // 旧版只 renderer.dispose()，切换 20 次模型显存会持续增长。
+    try {
+      this.clearMarkers(); this.clearSegments(); this.clearNormals();
+      this.clearSection(); this.clearGrid(); this.clearLabels(); this.clearBox();
+    } catch {}
+    if (this.axes) {
+      this.scene?.remove(this.axes);
+      this.axes.geometry?.dispose?.();
+      this.axes.material?.dispose?.();
+      this.axes = null;
+    }
+    if (this.scene) {
+      this.scene.traverse((obj) => {
+        obj.geometry?.dispose?.();
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const m of mats) {
+          if (!m) continue;
+          for (const key of ["map", "normalMap", "roughnessMap", "metalnessMap", "emissiveMap", "alphaMap"]) {
+            m[key]?.dispose?.();
+          }
+          m.dispose?.();
+        }
+      });
+      this.scene.clear?.();
+    }
+    this.mesh?.geometry?.dispose?.();
+    this.mat?.dispose?.();
+    this.mesh = null;
+    this.scene = null;
+    this.camera = null;
+    this.group = null;
+    if (this.renderer) {
+      this.renderer.dispose();
+      this.renderer.forceContextLoss?.();
+      this.renderer.domElement?.remove();
+      this.renderer = null;
+    }
   }
 }
 

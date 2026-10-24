@@ -16,6 +16,8 @@ const S = {
   viewers: [],
   showOriginal: false,
   repairActions: ["merge_vertices", "fill_holes", "fix_normals", "remove_small"],
+  lastRepair: null,   // 上次修复的结构化结果（含回退/降级原因）
+  lastProcess: null,  // 上次处理的结果摘要与警告
   rescaleFactor: 1,
   proc: {
     decimate_ratio: 1.0, hollow: false, wall_thickness: 2.0, drain_holes: 2,
@@ -205,6 +207,11 @@ const PRESETS = {
 };
 
 const SEV = { ok: "通过", info: "提示", warning: "警告", error: "严重" };
+// 检测项 id → 中文名，用于「未确认项」提示（后端 summary.degraded 里是 id）
+const ITEM_NAME = {
+  watertight: "水密性", normals: "法线", thickness: "壁厚", nonmanifold: "非流形边",
+  self_intersection: "自相交", components: "孤立面片", units: "单位与尺寸",
+};
 const ACT_LABEL = {
   merge_vertices: "合并重复顶点", fill_holes: "补洞", fix_normals: "统一法线",
   remove_small: "移除碎屑", resolve_self_intersection: "体素重网格消解自交",
@@ -937,6 +944,7 @@ function renderTriHist() {
   const verts = b64ToTyped(d.vertices, Float32Array);
   const idx = b64ToTyped(d.indices, Uint32Array);
   const n = idx.length / 3;
+  if (!n) { box.innerHTML = '<div class="queue-empty">模型没有三角面</div>'; return; }
   const areas = new Float64Array(n);
   for (let i = 0; i < n; i++) {
     const a = idx[i * 3] * 3, b = idx[i * 3 + 1] * 3, c = idx[i * 3 + 2] * 3;
@@ -945,11 +953,17 @@ function renderTriHist() {
     const cx = uy * vz - uz * vy, cy = uz * vx - ux * vz, cz = ux * vy - uy * vx;
     areas[i] = 0.5 * Math.hypot(cx, cy, cz);
   }
-  const sorted = Array.from(areas).sort((x, y) => x - y);
+  // TypedArray.sort() 是原子的数值排序，比 Array.from(...).sort(compare) 快一个量级；
+  // 旧写法还会额外分配一份 JS 对象数组，大网格上直接卡主线程。
+  const sorted = areas.sort();
   const q = (p) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
-  const p50 = q(0.5), p95 = q(0.95), p999 = q(0.999);
-  const tiny = sorted.filter((x) => x < 0.01).length;
-  const huge = sorted.filter((x) => x > p50 * 20).length;
+  const p50 = q(0.5), p95 = q(0.95);
+  let tiny = 0, huge = 0;
+  for (let i = 0; i < n; i++) {
+    const a = sorted[i];
+    if (a < 0.01) tiny++;
+    if (a > p50 * 20) huge++;
+  }
 
   // 对数分桶
   const bins = 18;
@@ -1060,16 +1074,31 @@ function reportHTML(rep) {
     bits.push(`${it.elapsed ?? 0}s`);
     return bits.join(" · ");
   };
-  return rep.items.map((it) => `
+  // 检测没跑成 / 降级的项要和「真的没问题」区分开：
+  // 后端已经给了 summary.degraded 和 value.error，界面以前完全没显示，
+  // 用户看到一片绿色，以为七项都过了。
+  const unconfirmed = new Set(rep.summary?.degraded || []);
+  const banner = unconfirmed.size
+    ? `<div class="rr-note warn" style="margin:0 0 10px">
+         有 ${unconfirmed.size} 项没能给出可信结论（${[...unconfirmed].map((id) => ITEM_NAME[id] || id).join("、")}），
+         评分等级已按「未确认」封顶，请补测或人工确认后再打印。
+       </div>`
+    : "";
+  return banner + rep.items.map((it) => {
+    const err = (it.value || {}).error;
+    const bad = err || unconfirmed.has(it.id);
+    return `
     <div class="report-item">
       <div class="sev ${it.severity}"></div>
       <div>
-        <div class="ri-name">${it.name}<span class="ri-tag">${SEV[it.severity]}</span></div>
+        <div class="ri-name">${it.name}<span class="ri-tag">${SEV[it.severity]}</span>${
+          bad ? `<span class="ri-tag unconfirmed">未确认</span>` : ""}</div>
         <div class="ri-msg">${it.message}</div>
         <div class="ri-meta">${meta(it)}</div>
       </div>
       <div>${it.fix ? `<button class="ghost" data-fix="${it.fix.action}">${it.fix.label}</button>` : ""}</div>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 }
 
 /* ---- 修复 */
@@ -1091,8 +1120,24 @@ function renderRepair(stage) {
       <span>${ACT_LABEL[a]}</span><small>${hints[a]}</small>
     </label>`;
   const advSel = ADV.filter(has).length;
+  const lr = S.lastRepair;
+  const resultCard = lr ? `
+    <div class="block repair-result">
+      <div class="block-head">
+        <div><div class="block-title">上次修复结果 <span class="dim">${lr.at}</span></div>
+          <div class="block-sub">${(lr.actions || []).map((a) => `${a.label}${a.ok ? "" : "（回退）"}`).join(" · ")}</div></div>
+        <button class="ghost small" id="btn-repair-clear">清除</button>
+      </div>
+      <div class="block-body">
+        ${lr.before && lr.after ? `<div class="rr-row">面数 <b>${lr.before.faces}</b> → <b>${lr.after.faces}</b>　水密 <b>${lr.before.is_watertight ? "是" : "否"}</b> → <b>${lr.after.is_watertight ? "是" : "否"}</b></div>` : ""}
+        ${(lr.lines || []).map((t) => `<div class="rr-row dim">${t}</div>`).join("")}
+        ${(lr.notes || []).map((n) => `<div class="rr-note ${n.level}">${n.text}</div>`).join("")}
+        ${!(lr.notes || []).length ? `<div class="rr-note ok">没有回退或降级项，修复结果可信。</div>` : ""}
+      </div>
+    </div>` : "";
   stage.innerHTML = `
     ${guideOf("repair")}
+    ${resultCard}
     <div class="block">
       <div class="block-head">
         <div><div class="block-title">修复动作</div>
@@ -1110,10 +1155,25 @@ function renderRepair(stage) {
         </details>
 
         <div class="repair-params">
+          <div class="field" data-param-for="fill_holes" ${has("fill_holes") ? "" : "hidden"}>
+            <div class="field-top"><span class="field-label">补洞细分</span><span class="field-unit">级</span></div>
+            <input type="number" id="p-levels" value="2" step="1" min="0" max="4">
+            <div class="field-help">补丁内部加点层数。0 = 平面补丁，2 适合大多数曲面，4 只给大洞用（面数增长很快）。</div>
+          </div>
+          <div class="field" data-param-for="fill_holes" ${has("fill_holes") ? "" : "hidden"}>
+            <div class="field-top"><span class="field-label">补洞平滑</span><span class="field-unit">次</span></div>
+            <input type="number" id="p-fillsmooth" value="12" step="2" min="0" max="50">
+            <div class="field-help">固定边界的拉普拉斯平滑次数。0 = 保留细分折线，过高会把补丁拉塌。</div>
+          </div>
+          <div class="field" data-param-for="resolve_self_intersection" ${has("resolve_self_intersection") ? "" : "hidden"}>
+            <div class="field-top"><span class="field-label">重网格精度</span><span class="field-unit">mm</span></div>
+            <input type="number" id="p-pitch" value="0" step="0.05" min="0" max="20">
+            <div class="field-help">体素边长。0 = 按模型尺寸自动取；越小越贴近原形，但内存与耗时按立方增长。</div>
+          </div>
           <div class="field" data-param-for="remove_small" ${has("remove_small") ? "" : "hidden"}>
-            <div class="field-top"><span class="field-label">碎屑阈值</span><span class="field-unit">占最大部件体积比</span></div>
+            <div class="field-top"><span class="field-label">碎屑阈值</span><span class="field-unit">占最大部件面积比</span></div>
             <input type="number" id="p-small" value="0.01" step="0.005" min="0.0001" max="0.5">
-            <div class="field-help">体积小于最大连通体此比例的部件会被删除。0.01 表示 1%。</div>
+            <div class="field-help">表面积小于最大连通体此比例的部件会被删除。0.01 表示 1%。</div>
           </div>
           <div class="field" data-param-for="thicken" ${has("thicken") ? "" : "hidden"}>
             <div class="field-top"><span class="field-label">加厚量</span><span class="field-unit">mm</span></div>
@@ -1154,14 +1214,31 @@ function renderRepair(stage) {
   });
   const rec = $("#btn-repair-rec");
   if (rec) rec.onclick = () => { S.repairActions = [...CORE]; render(); };
+  const clr = $("#btn-repair-clear");
+  if (clr) clr.onclick = () => { S.lastRepair = null; render(); };
   $("#btn-repair").onclick = runRepair;
 }
 
 /* ---- 处理 */
 function renderProcess(stage) {
   const p = S.proc;
+  const lp = S.lastProcess;
+  const procCard = lp ? `
+    <div class="block repair-result">
+      <div class="block-head">
+        <div><div class="block-title">上次处理结果 <span class="dim">${lp.at}</span></div>
+          <div class="block-sub">${(lp.msgs || []).join(" · ") || "无变化"}</div></div>
+        <button class="ghost small" id="btn-proc-clear">清除</button>
+      </div>
+      <div class="block-body">
+        ${(lp.warns || []).length
+          ? (lp.warns || []).map((w) => `<div class="rr-note warn">${w}</div>`).join("")
+          : `<div class="rr-note ok">没有回退或需要额外确认的项。</div>`}
+      </div>
+    </div>` : "";
   stage.innerHTML = `
     ${guideOf("process")}
+    ${procCard}
     <div class="block">
       <div class="block-head"><div class="block-title">当前模型</div>
         <div class="block-sub">拖动旋转。参数改动不会立刻重算，点「开始处理」才执行</div></div>
@@ -1274,6 +1351,8 @@ function renderProcess(stage) {
     if (el) el.oninput = () => { S.proc[key] = parse(el.value); };
   };
   $("#p-dec").oninput = (e) => { S.proc.decimate_ratio = +e.target.value; $("#v-dec").textContent = (+e.target.value).toFixed(2); };
+  const pc = $("#btn-proc-clear");
+  if (pc) pc.onclick = () => { S.lastProcess = null; render(); };
   bind("#p-wall", "wall_thickness");
   bind("#p-drain", "drain_holes", (v) => parseInt(v, 10));
   bind("#p-holed", "hole_diameter");
@@ -2222,11 +2301,16 @@ function renderExport(stage) {
         e.target.parentElement.after(div);
         return div;
       })();
+      const bad = d.interferences || [];
+      const unconfirmed = d.degraded || [];
       box.innerHTML = d.ok
         ? `✓ ${d.note}（容差 ${d.tolerance_mm3}mm³）`
         : `<span style="color:var(--error)">✗ ${d.note}</span><br>`
-          + d.interferences.map((x) => `第 ${x.a} 块 ↔ 第 ${x.b} 块：重叠 ${x.volume_mm3}mm³`).join("<br>");
-      toast(d.ok ? "各块无干涉" : `发现 ${d.interferences.length} 处干涉`, d.ok ? "ok" : "err");
+          + bad.map((x) => `第 ${x.a} 块 ↔ 第 ${x.b} 块：重叠 ${x.volume_mm3}mm³`).join("<br>")
+          + (unconfirmed.length
+            ? `<br><span class="dim">未确认：` + unconfirmed.map((x) => `第 ${x.a} 块 ↔ 第 ${x.b} 块`).join("、") + `</span>`
+            : "");
+      toast(d.ok ? "各块无干涉" : (bad.length ? `发现 ${bad.length} 处干涉` : `${unconfirmed.length} 对未确认`), d.ok ? "ok" : "err");
     } catch (err) { toast("间隙检查失败：" + err.message, "err"); }
   };
   if ($("#btn-assembly")) $("#btn-assembly").onclick = async (e) => {
@@ -2534,6 +2618,7 @@ async function loadProjects() {
 }
 
 async function loadProject(pid) {
+  if (S.pid !== pid) { S.lastRepair = null; S.lastProcess = null; }  // 换模型不要沿用上一个模型的结果
   S.pid = pid;
   const p = await api(`/api/projects/${pid}`);
   S.project = p;
@@ -2579,22 +2664,31 @@ async function uploadFiles(files) {
 function startJob(res, onDone) {
   S.job = res;
   setGauge(res);
-  clearInterval(S.jobTimer);
-  S.jobTimer = setInterval(async () => {
+  clearTimeout(S.jobTimer);
+  const tick = async () => {
     let j;
-    try { j = await api(`/api/jobs/${res.id}`); } catch { return; }
+    try {
+      j = await api(`/api/jobs/${res.id}`);
+    } catch {
+      // 网络抖动不终止轮询；后台标签页降到 1.5s，避免 350ms 常驻请求
+      S.jobTimer = setTimeout(tick, document.hidden ? 1500 : 350);
+      return;
+    }
     S.job = j;
     setGauge(j);
     refreshQueue();
     if (["done", "failed", "cancelled"].includes(j.status)) {
-      clearInterval(S.jobTimer);
+      clearTimeout(S.jobTimer);
       $("#btn-pause").disabled = true;
       $("#btn-cancel").disabled = true;
       if (j.status === "failed") { toast(j.error || "任务失败", "err"); showErrorCard(j); }
       if (j.status === "cancelled") toast("已中断，可点「恢复」从断点继续", "warn");
       if (j.status === "done") onDone && onDone(j);
+      return;
     }
-  }, 350);
+    S.jobTimer = setTimeout(tick, document.hidden ? 1500 : 350);
+  };
+  S.jobTimer = setTimeout(tick, 350);
 }
 
 function setGauge(j) {
@@ -2655,12 +2749,26 @@ async function afterAnalyze(j) {
 
 async function runRepair() {
   if (!S.repairActions.length) return toast("至少选一个修复动作", "warn");
-  const body = {
-    actions: S.repairActions,
-    small_ratio: parseFloat($("#p-small")?.value || "0.01"),
-    thicken_mm: parseFloat($("#p-thicken")?.value || "0.5"),
-    scale_factor: parseFloat($("#p-rescale")?.value || "1"),
+  // 只提交当前选中动作真正用到的参数：把所有参数一股脑发过去，
+  // 后端会照单全收并写进任务 params，排查时看不出哪些是用户真的设过的。
+  const num = (id, dflt) => {
+    const el = $(id);
+    if (!el) return dflt;
+    const v = parseFloat(el.value);
+    return Number.isFinite(v) ? v : dflt;
   };
+  const body = { actions: S.repairActions };
+  if (S.repairActions.includes("remove_small")) body.small_ratio = num("#p-small", 0.01);
+  if (S.repairActions.includes("fill_holes")) {
+    body.fill_levels = Math.round(num("#p-levels", 2));
+    body.fill_smooth = Math.round(num("#p-fillsmooth", 12));
+  }
+  if (S.repairActions.includes("resolve_self_intersection")) {
+    const pitch = num("#p-pitch", 0);
+    if (pitch > 0) body.remesh_pitch = pitch;   // 0 交给后端按模型尺寸自动取
+  }
+  if (S.repairActions.includes("thicken")) body.thicken_mm = num("#p-thicken", 0.5);
+  if (S.repairActions.includes("rescale")) body.scale_factor = num("#p-rescale", 1);
   try {
     const r = await api(`/api/projects/${S.pid}/repair`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
@@ -2675,10 +2783,49 @@ async function afterRepair(j) {
   S.advice = null; // 修复后几何变了，旧建议作废，去建议页会按新几何重新生成
   await loadProjects();
   const b = j.result?.before, a = j.result?.after;
+  // 每个动作的 info 里藏着「到底修成了没有」：reverted（回退）、degraded（降级）、
+  // pitch 被收敛、加厚量被收敛、补洞面与实体穿插……以前这些都只写进任务日志，
+  // 界面上永远是一句「修复完成：面数 X → X」。用户以为修好了，实际什么都没变。
+  const notes = [];
+  const lines = [];
+  for (const step of j.result?.actions || []) {
+    const info = step.info || {};
+    if (info.reverted) {
+      notes.push({ level: "err", text: `${step.label}：未达验收标准，已回退 — ${info.revert_reason || "原因见任务日志"}` });
+    } else if (info.degraded) {
+      notes.push({ level: "warn", text: `${step.label}：${info.degrade_reason || "结果降级，需人工确认"}` });
+    }
+    if (info.patch_hits) {
+      notes.push({ level: "warn", text: `${step.label}：补洞面与实体面穿插 ${info.patch_hits} 处` });
+    }
+    if (info.volume_warning) notes.push({ level: "warn", text: `${step.label}：${info.volume_warning}` });
+    if (info.requested_mm && info.delta_mm) {
+      notes.push({ level: "warn", text: `${step.label}：请求 ${info.requested_mm}mm，实际按 ${info.delta_mm}mm 执行（已收敛到模型尺度内）` });
+    }
+    if (info.pitch_requested && info.pitch && Math.abs(info.pitch_requested - info.pitch) > 1e-9) {
+      notes.push({ level: "info", text: `${step.label}：请求精度 ${info.pitch_requested}mm，实际生效 ${info.pitch}mm（内存上限收敛）` });
+    }
+    if (info.removed_slivers) lines.push(`${step.label}：删除 ${info.removed_slivers} 个零厚度薄片面`);
+    if (info.self_intersections_after !== undefined && info.self_intersections_after !== null) {
+      lines.push(`${step.label}：自交 ${info.self_intersections_before ?? "?"} → ${info.self_intersections_after} 处`);
+    }
+  }
+  S.lastRepair = {
+    at: new Date().toLocaleTimeString(),
+    before: b, after: a, notes, lines,
+    actions: (j.result?.actions || []).map((s) => ({ label: s.label, ok: !s.info?.reverted })),
+  };
   if (b && a) {
     toast(`修复完成：面数 ${b.faces} → ${a.faces}，水密 ${b.is_watertight ? "是" : "否"} → ${a.is_watertight ? "是" : "否"}`);
   }
-  S.step = 1; renderSteps();
+  for (const n of notes.slice(0, 3)) {
+    // toast 是短提示，完整原因在「上次修复结果」卡里
+    toast(n.text.length > 110 ? n.text.slice(0, 108) + "…（详见修复结果）" : n.text, n.level);
+  }
+  // 有回退/降级时留在修复页，让结果卡直接可见；一切正常才跳到检测页看新报告。
+  // 以前一律跳检测页，回退的修复会变成「页面说修好了、模型其实没变」。
+  S.step = notes.length ? 2 : 1;
+  renderSteps();
   if (j.result?.analysis) {
     // 后端已在修复后复检，直接用新报告，避免「修完还说不水密」以及重复检测
     S.analysis = j.result.analysis;
@@ -2704,12 +2851,35 @@ async function afterProcess(j) {
   await loadProjects();
   const rep = j.result?.report || {};
   const msgs = [];
+  const warns = [];
   if (rep.hollow) msgs.push(`镂空省料 ${rep.hollow.resin_saved_pct}%`);
-  if (rep.drill) msgs.push(`打了 ${rep.drill.holes} 个孔`);
+  if (rep.hollow_warning) warns.push(rep.hollow_warning);
+  if (rep.drill) {
+    msgs.push(`打了 ${rep.drill.holes} 个孔`);
+    if (rep.drill.thin_fallback) {
+      warns.push(`底面 ${rep.drill.skipped_thin || 0} 个候选位置壳厚不足，已在最薄处开孔，请确认孔是打穿而不是打成豁口`);
+    }
+  }
+  if (rep.decimate?.reverted) {
+    // 减面被回退是重要信息：用户以为减到 30%，实际还是原面数
+    warns.push(`减面已回退：${rep.decimate.reason}（保留 ${rep.decimate.faces_kept} 面）`);
+  } else if (rep.decimate) {
+    msgs.push(`减面到 ${rep.decimate.faces} 面`);
+  }
   if (rep.supports?.count) msgs.push(`${rep.supports.count} 根支撑`);
+  if (rep.supports?.diameter_effective) {
+    warns.push(`支撑直径随缩放变成 ${rep.supports.diameter_effective}mm（设定 ${rep.supports.diameter}mm）`);
+  }
   if (rep.orient) msgs.push(`姿态：${rep.orient.chosen}`);
+  for (const w of rep.warnings || []) warns.push(w);
   toast("处理完成：" + (msgs.join("，") || "无变化"));
-  S.step = 4; renderSteps(); render();
+  for (const w of warns.slice(0, 3)) {
+    toast(w.length > 110 ? w.slice(0, 108) + "…" : w, "warn");
+  }
+  S.lastProcess = { at: new Date().toLocaleTimeString(), msgs, warns };
+  // 有警告时留在处理页，让结果卡直接可见；一切正常才跳到建议页
+  S.step = warns.length ? 3 : 4;
+  renderSteps(); render();
   loadAdvice();
 }
 
@@ -2916,14 +3086,17 @@ async function loadIssues() {
     let total = 0;
     for (const [pts, color] of groups) {
       if (!pts || !pts.length) continue;
-      v.markPoints(pts, color);
+      // append=true：三类问题要同时显示，不能被后一类的 clearMarkers 清掉
+      v.markPoints(pts, color, true);
       total += pts.length;
     }
+    const deg = d.degraded || [];
+    const degTxt = deg.length ? `；${deg.length} 项定位失败（${deg.map((x) => x.check).join("、")}），结果未确认` : "";
     $("#heat-legend").textContent = total
-      ? `已在模型上标出 ${total} 处：红=自交（${c.self_intersection || 0}）、橙=破洞（${c.holes || 0}）、紫=碎屑（${c.debris || 0}）`
-      : "没找到可定位的问题点（模型可能是干净的，或问题太小定位不到）";
+      ? `已在模型上标出 ${total} 处：红=自交（${c.self_intersection || 0}）、橙=破洞（${c.holes || 0}）、紫=碎屑（${c.debris || 0}）${degTxt}`
+      : (deg.length ? `问题定位未完成：${degTxt.slice(2)}` : "没找到可定位的问题点（模型可能是干净的，或问题太小定位不到）");
     $("#btn-issues").classList.toggle("on", total > 0);
-    if (!total) toast("没有可定位的问题点");
+    if (!total) toast(deg.length ? "问题定位未完成，结果未确认" : "没有可定位的问题点", deg.length ? "warn" : "ok");
   } catch (e) { toast("问题定位失败：" + e.message, "err"); }
 }
 
@@ -3260,6 +3433,33 @@ async function pollResources() {
   } catch {}
 }
 
+/** 定时轮询：页面隐藏时停表，回来立即补一次。
+ *  旧实现用 setInterval 常驻，切到后台仍按 1.5s/2s 请求接口；
+ *  同时防止上一次请求没回来就叠加下一次（慢接口会排队）。 */
+function pollEvery(ms, fn) {
+  let timer = 0;
+  let stopped = false;
+  let busy = false;
+  const tick = async () => {
+    timer = 0;
+    if (stopped || document.hidden) return;
+    if (busy) { timer = setTimeout(tick, ms); return; }
+    busy = true;
+    try { await fn(); } catch {} finally { busy = false; }
+    if (!stopped && !document.hidden) timer = setTimeout(tick, ms);
+  };
+  const onVisible = () => {
+    if (!stopped && !document.hidden && !timer) timer = setTimeout(tick, ms);
+  };
+  document.addEventListener("visibilitychange", onVisible);
+  timer = setTimeout(tick, ms);
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+    document.removeEventListener("visibilitychange", onVisible);
+  };
+}
+
 /* ---------------------------------------------------------------- 启动 */
 function bindDrop() {
   const veil = $("#dropveil");
@@ -3293,9 +3493,11 @@ async function boot() {
   $("#btn-pause").onclick = () => jobCmd(S.job?.status === "paused" ? "resume" : "pause");
   $("#btn-cancel").onclick = () => jobCmd("cancel");
   pollResources();
-  setInterval(pollResources, 2000);
+  pollEvery(2000, pollResources);
   refreshQueue();
-  setInterval(refreshQueue, 1500);
+  // 队列列表不必 1.5s 刷一次：任务运行时 startJob 每 350ms 会顺带刷新，
+  // 空闲时 5s 足够，后台标签页直接停表。
+  pollEvery(5000, refreshQueue);
   window.addEventListener("resize", () => (S.viewers || []).forEach((v) => v.resize()));
   window.addEventListener("keydown", (e) => {
     const tag = (e.target.tagName || "").toLowerCase();

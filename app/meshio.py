@@ -16,9 +16,15 @@ import numpy as np
 
 from . import config
 
+# 两级缓存：原始网格按「文件」缓存，预览网格按「文件 + 目标面数」缓存。
+# 旧实现把 preview_faces 写进唯一缓存键，同一文件被 40k/50k/60k/80k/120k
+# 各存一份，每次换预览档都要重新解析一遍 STL，缓存命中率被稀释。
 _CACHE: "OrderedDict[tuple, object]" = OrderedDict()
 _CACHE_MAX = 3
-_CACHE_FACES_BUDGET = 3_000_000  # 缓存里最多留多少面，超了淘汰最旧的
+_CACHE_FACES_BUDGET = 3_000_000  # 原始网格缓存最多留多少面，超了淘汰最旧的
+_PREVIEW_CACHE: "OrderedDict[tuple, object]" = OrderedDict()
+_PREVIEW_CACHE_MAX = 5
+_PREVIEW_FACES_BUDGET = 1_500_000  # 预览网格总量上限，避免多档预览吃光内存
 
 _STL_DTYPE = np.dtype([("n", "<f4", (3,)), ("v", "<f4", (3, 3)), ("attr", "<u2")])
 
@@ -151,39 +157,81 @@ def _weld(vertices: np.ndarray, faces: np.ndarray, decimals: int = 5) -> tuple[n
 
 
 # ---------------------------------------------------------------- 缓存
-def _cache_key(path: Path, preview: int) -> tuple:
+def _cache_key(path: Path) -> tuple:
     st = path.stat()
-    return (str(path.resolve()), st.st_mtime_ns, st.st_size, preview)
+    return (str(path.resolve()), st.st_mtime_ns, st.st_size)
 
 
-def load_mesh(path: Path, preview_faces: int = 0):
-    """加载为 trimesh.Trimesh；preview_faces>0 时额外降采样用于前端预览。"""
-    import trimesh
-
-    path = Path(path)
-    key = _cache_key(path, preview_faces)
-    hit = _CACHE.get(key)
-    if hit is not None:
-        _CACHE.move_to_end(key)
-        return hit
-
-    verts, faces = load_vertices_faces(path)
-    if preview_faces and len(faces) > preview_faces:
-        verts, faces = decimate_arrays(verts, faces, preview_faces)
-    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False, validate=False)
-    mesh.metadata["source_path"] = str(path)
-
-    _CACHE[key] = mesh
-    _CACHE.move_to_end(key)
+def _trim_caches() -> None:
+    """按条数与面数预算淘汰最旧条目。"""
     while len(_CACHE) > _CACHE_MAX:
         _CACHE.popitem(last=False)
     total = sum(len(m.faces) for m in _CACHE.values())
     while total > _CACHE_FACES_BUDGET and len(_CACHE) > 1:
         _, old = _CACHE.popitem(last=False)
         total -= len(old.faces)
+
+    while len(_PREVIEW_CACHE) > _PREVIEW_CACHE_MAX:
+        _PREVIEW_CACHE.popitem(last=False)
+    total = sum(len(m.faces) for m in _PREVIEW_CACHE.values())
+    while total > _PREVIEW_FACES_BUDGET and len(_PREVIEW_CACHE) > 1:
+        _, old = _PREVIEW_CACHE.popitem(last=False)
+        total -= len(old.faces)
+
+
+def _load_base_mesh(path: Path):
+    """加载未降采样的原始网格（带缓存）。"""
+    import trimesh
+
+    key = _cache_key(path)
+    hit = _CACHE.get(key)
+    if hit is not None:
+        _CACHE.move_to_end(key)
+        return key, hit
+
+    verts, faces = load_vertices_faces(path)
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False, validate=False)
+    mesh.metadata["source_path"] = str(path)
+    _CACHE[key] = mesh
+    _CACHE.move_to_end(key)
+    _trim_caches()
+    return key, mesh
+
+
+def load_mesh(path: Path, preview_faces: int = 0, mutable: bool = False):
+    """加载为 trimesh.Trimesh；preview_faces>0 时从原始网格降采样用于前端预览。
+
+    `mutable=True` 表示调用方会原地改这份网格（缩放、平移、旋转、合并顶点…），
+    此时返回缓存对象的**副本**。缓存是按「路径 + mtime + 面数上限」命中的，
+    如果直接把缓存对象交出去让调用方 `apply_scale`，下一次同路径加载拿到的
+    就是已经被缩放过的模型——实测第二次加载 60mm 的球变成 120mm，
+    而且这个污染会跨请求保留到进程重启。
+
+    预览网格从缓存的原始网格派生：同一文件换 40k/60k/120k 只需解码一次 STL。
+    """
+    import trimesh
+
+    path = Path(path)
+    key, base = _load_base_mesh(path)
+    if preview_faces and len(base.faces) > preview_faces:
+        pkey = (key, int(preview_faces))
+        mesh = _PREVIEW_CACHE.get(pkey)
+        if mesh is not None:
+            _PREVIEW_CACHE.move_to_end(pkey)
+        else:
+            verts, faces = decimate_arrays(
+                np.asarray(base.vertices), np.asarray(base.faces), int(preview_faces)
+            )
+            mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False, validate=False)
+            mesh.metadata["source_path"] = str(path)
+            _PREVIEW_CACHE[pkey] = mesh
+            _trim_caches()
+    else:
+        mesh = base
+
     _enforce_memory_budget()
     gc.collect()
-    return mesh
+    return mesh.copy() if mutable else mesh
 
 
 def _cluster_decimate(verts: np.ndarray, faces: np.ndarray, target: int) -> tuple[np.ndarray, np.ndarray]:
@@ -246,13 +294,15 @@ def _enforce_memory_budget() -> None:
     except Exception:
         return
     limit = config.get().runtime.memory_limit_mb
-    if limit and mb > limit * 0.75 and _CACHE:
+    if limit and mb > limit * 0.75 and (_CACHE or _PREVIEW_CACHE):
         _CACHE.clear()
+        _PREVIEW_CACHE.clear()
         gc.collect()
 
 
 def clear_cache() -> None:
     _CACHE.clear()
+    _PREVIEW_CACHE.clear()
     gc.collect()
 
 

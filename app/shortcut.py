@@ -1,13 +1,14 @@
 """桌面快捷方式：给这个工具在 Windows 桌面上放一个「一键启动」的图标。
 
-只在 Windows 生效。做法两步：
+只在 Windows 生效。两条路径：
 
-1. 在项目根目录生成/更新一个启动脚本（.cmd）：用项目自带 venv 的 python
-   起服务，等 3 秒后自动打开浏览器；服务停掉后窗口不立刻消失，方便看报错。
-2. 用 PowerShell 的 WScript.Shell COM 在桌面创建指向该 .cmd 的 .lnk。
+- **打包版（frozen）**：快捷方式直接指向 EXE 本身，图标取自 EXE 内嵌资源，
+  右键「打开文件所在位置」就落在程序包目录。
+- **源码版**：在项目根生成/更新一个启动脚本（.cmd），快捷方式指向它，
+  用项目自带 venv 的 python 起服务。
 
-关键点：**程序本体始终留在项目所在的盘（当前是 I 盘）**，桌面只放一个
-指向它的快捷方式。这样换机器/改路径时，只要改启动器，快捷方式不用动。
+.lnk 的写入走 `app/lnk.py`（ctypes 直连 IShellLink COM），不经 PowerShell——
+既绕过 ExecutionPolicy，也避免打包后子进程权限上下文变化导致 Save 失败。
 """
 from __future__ import annotations
 
@@ -40,7 +41,7 @@ pause >nul
 
 
 def _desktop_dir() -> Path | None:
-    """找桌面目录。Windows 桌面可能被 OneDrive 重定向，优先问系统。"""
+    """找桌面目录。Windows 桌面可能被 OneDrive / 别的盘重定向，优先问系统。"""
     if os.name != "nt":
         return None
     try:
@@ -53,6 +54,18 @@ def _desktop_dir() -> Path | None:
             return Path(p)
     except Exception:
         pass
+    # 兜底：读注册表里的桌面路径（比猜 Desktop/OneDrive 可靠，支持重定向到 D:\ 等）
+    try:
+        import winreg
+
+        key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+            raw = winreg.QueryValueEx(k, "Desktop")[0]
+        p = Path(os.path.expandvars(raw))
+        if p.exists():
+            return p
+    except Exception:
+        pass
     home = Path.home()
     for cand in (home / "Desktop", home / "OneDrive" / "Desktop", home / "桌面"):
         if cand.exists():
@@ -63,6 +76,18 @@ def _desktop_dir() -> Path | None:
 def _python_exe() -> str:
     venv_py = config.ROOT / ".venv" / "Scripts" / "python.exe"
     return str(venv_py) if venv_py.exists() else sys.executable
+
+
+def _target() -> tuple[str, str, str]:
+    """快捷方式三件套：(目标, 工作目录, 图标)。
+
+    打包成 EXE 后直接指向 EXE 本身（图标也取自 EXE 内嵌资源），
+    不再经过 .cmd / venv，彻底不依赖本机 Python。
+    """
+    if getattr(sys, "frozen", False):
+        exe = Path(sys.executable).resolve()
+        return str(exe), str(exe.parent), f"{exe},0"
+    return str(ensure_launcher()), str(config.ROOT), f"{_python_exe()},0"
 
 
 def ensure_launcher() -> Path:
@@ -83,39 +108,32 @@ def create_desktop_shortcut() -> dict:
     if desktop is None:
         return {"ok": False, "error": "找不到桌面目录（可能被 OneDrive 重定向或权限受限）"}
 
-    launcher = ensure_launcher()
     lnk = desktop / LNK_NAME
-    icon = _python_exe()
+    target, workdir, icon = _target()
+    icon_path, _, icon_idx = icon.rpartition(",")
+    if not icon_path:
+        icon_path, icon_idx = icon, "0"
 
-    # 路径里没有单引号，PowerShell 单引号字面量安全
-    ps = (
-        "$ws = New-Object -ComObject WScript.Shell; "
-        f"$sc = $ws.CreateShortcut('{lnk}'); "
-        f"$sc.TargetPath = '{launcher}'; "
-        f"$sc.WorkingDirectory = '{config.ROOT}'; "
-        f"$sc.IconLocation = '{icon},0'; "
-        "$sc.Description = '3D 打印模型处理工具集（一键启动）'; "
-        "$sc.WindowStyle = 1; "
-        "$sc.Save()"
-    )
     try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
-            capture_output=True, text=True, timeout=25,
+        from . import lnk as lnk_mod
+
+        lnk_mod.create_lnk(
+            str(lnk), target, workdir=workdir,
+            icon=icon_path, icon_index=int(icon_idx or 0),
+            description="3D 打印建模工具（机型预设 + 参数建议）",
         )
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": f"调用 PowerShell 失败：{e}"}
+        return {"ok": False, "error": f"创建快捷方式失败：{e}"}
 
-    if r.returncode != 0 or not lnk.exists():
-        msg = (r.stderr or r.stdout or "创建失败").strip()
-        return {"ok": False, "error": msg[:300]}
+    if not lnk.exists():
+        return {"ok": False, "error": "快捷方式文件没有写入成功"}
 
     return {
         "ok": True,
         "lnk": str(lnk),
-        "launcher": str(launcher),
+        "launcher": target,
         "desktop": str(desktop),
-        "root": str(config.ROOT),
+        "root": str(config.BASE),
     }
 
 
@@ -128,6 +146,6 @@ def shortcut_status() -> dict:
         "desktop": str(desktop) if desktop else None,
         "lnk": str(lnk) if lnk else None,
         "exists": bool(lnk and lnk.exists()),
-        "launcher": str(config.ROOT / LAUNCHER_NAME),
-        "root": str(config.ROOT),
+        "launcher": str(Path(_target()[0])),
+        "root": str(config.BASE),
     }

@@ -240,6 +240,16 @@ statue_30k 1200 射线  1 方向   最大差值 0.00e+00  命中数差 0   5.8x
 不是本次改动的收益，来自并发会话对自交判定（`tri_tri_overlap`）与部件分类的重写。
 此处如实分列，不把别人的收益算进来。
 
+### Round 3 · 后端热路径 + 前端资源
+
+| 项目 | 内容 |
+|---|---|
+| **问题** | ① 支撑密度用逐点 `query_ball_point` 返回索引列表，再取长度，Python 侧开销与点数×邻居数同阶；② 镂空为了报出 `cavity_mm3`，在 `hollow_shell()` 之后又调 `cavity_volume()`，同一份体素栅格被建了两次、EDT 也跑两次；③ 预览按尺寸派生，同一 STL 在 40k/50k/60k/80k/120k 五个尺寸下被重复解析；④ 装配干涉对所有包围盒相交对无差别做几何求交；⑤ 布尔求交抛异常被当成「无干涉」；⑥ 问题统计逐组 Python 累加；⑦ 前端从 CDN 取 Three.js、渲染循环常驻、标记/网格/剖面切换只 remove 不 dispose；⑧ 页面隐藏时轮询继续、请求可重叠。 |
+| **方案** | 后端：`cKDTree.query_ball_point(..., return_length=True)` 直接取计数；`_inside_distance()` 抽出后，镂空在一次体素化 + EDT 里同时算壳与腔体体积；`meshio` 加「原始网格 + 预览派生」两级缓存，预览尺寸只影响派生；装配先 AABB 预筛再精判，并回报预筛/精判对数；布尔失败置 `degraded`；`project_issues()` 用 `np.bincount`。前端：内置 `static/vendor/three.module.min.js`（r160）优先、CDN 兜底；`viewer` 改按需渲染；所有 `clear*` 分支释放 geometry/material；`app.js` 轮询在隐藏时暂停、串行不重叠、直方图用 `Float64Array.sort()`。 |
+| **收益** | `support_density`：ball_20k 125 → **88 ms**（1.4×），ball_82k 415 → **276 ms**（1.5×）；`hollow` 省掉一次完整体素化（独立 `cavity_volume` 实测约 0.8 s）；多尺寸预览只解析一次；空闲页面 1 秒内仅 1 次 `requestAnimationFrame`（原约 60 次）。 |
+| **回归风险** | 腔体体积改由同一次 EDT 产出，浮点累加顺序不同可能有 ulp 级差异；装配在 AABB 预筛后仍逐对精判，判定结果不变，但 `degraded` 语义从「无干涉」变成「有未判定的对」。 |
+| **验证** | 新增 `tests/test_optimizations.py` 7 项（向量化等价、镂空统计量与独立实现一致、单次流水线、预览解析复用、缓存清理、AABB 预筛、布尔失败降级）；`pytest tests -q` **143 passed**；`bench/round_gate.py` 28/28；`bench/run.py --quick` 44 阶段 0 超阈值 / 0 指纹差异；浏览器实测本地 r160 加载、检测出 7 项、154 处标记、控制台无报错。 |
+
 ---
 
 ## 4. 外部依据（来源 / 获取时间 / 可信度）

@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 _BACKEND: str | None = None
@@ -32,9 +34,40 @@ def _mark(op: str, where: str) -> None:
     _LAST[op] = where
 
 
+def _cuda_driver_present() -> bool:
+    """机器上到底有没有 CUDA 驱动库。
+
+    为什么先查驱动再导入：`import cupy` 本身就要把整套 CUDA 运行时映射进进程，
+    实测常驻内存 +330MB、首次耗时 +300ms——而没装驱动的机器上它必然失败，
+    这 330MB 纯属白付。基准里这一笔还被记到了「第一次调用 GPU 的那个阶段」头上，
+    看起来像是那个阶段内存回归了。
+    """
+    try:
+        import ctypes.util
+
+        for name in ("cuda", "nvcuda"):
+            try:
+                if ctypes.util.find_library(name):
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+    if os.name == "nt":
+        root = os.environ.get("SystemRoot") or r"C:\Windows"
+        return os.path.exists(os.path.join(root, "System32", "nvcuda.dll"))
+    for p in ("/usr/lib/x86_64-linux-gnu/libcuda.so.1", "/usr/lib64/libcuda.so.1",
+              "/usr/local/cuda/lib64/libcuda.so.1"):
+        if os.path.exists(p):
+            return True
+    return False
+
+
 def _probe_cupy() -> bool:
     """真的编译并跑一次内核——只探测到设备但缺 CUDA 头文件时，这里会失败，
     从而诚实退回 CPU，而不是「自称有 GPU 但每次调用都抛异常再回退」。"""
+    if not _cuda_driver_present():
+        return False
     try:
         import cupy as cp  # type: ignore
 
@@ -48,6 +81,8 @@ def _probe_cupy() -> bool:
 
 
 def _probe_torch() -> bool:
+    if not _cuda_driver_present():
+        return False
     try:
         import torch  # type: ignore
 
@@ -150,6 +185,12 @@ def _smooth_numpy(verts, edges, fixed, iters, lam):
     deg = np.zeros(n, dtype=np.float64)
     np.add.at(deg, edges[:, 0], 1.0)
     np.add.at(deg, edges[:, 1], 1.0)
+    # 孤立顶点（没有边）必须视为固定点。
+    # 旧实现把 deg 夹到 1，于是这些点的邻居平均是 0 向量，每轮变成 v*(1-lam)——
+    # 实测 (999,999,999) 迭代 10 次后变成 (0.98,0.98,0.98)，等于把游离顶点
+    # 拽到原点。补洞平滑和体素平滑都会走到这里，只是通常没有孤立点才没暴露。
+    isolated = deg <= 0.0
+    hold = np.asarray(fixed, dtype=bool) | isolated
     deg = np.maximum(deg, 1.0)
     v = verts.copy()
     for _ in range(iters):
@@ -157,7 +198,7 @@ def _smooth_numpy(verts, edges, fixed, iters, lam):
         np.add.at(acc, edges[:, 0], v[edges[:, 1]])
         np.add.at(acc, edges[:, 1], v[edges[:, 0]])
         avg = acc / deg[:, None]
-        v = np.where(fixed[:, None], v, v * (1.0 - lam) + avg * lam)
+        v = np.where(hold[:, None], v, v * (1.0 - lam) + avg * lam)
     return v
 
 
@@ -171,13 +212,15 @@ def _smooth_cupy(verts, edges, fixed, iters, lam):
     deg = cp.zeros(n, dtype=cp.float64)
     cp.add.at(deg, e[:, 0], 1.0)
     cp.add.at(deg, e[:, 1], 1.0)
+    # 孤立顶点保持不动（与 CPU 路径一致，否则两条后端结果不同）
+    hold = cp.asarray(fixed) | (deg <= 0.0)
     deg = cp.maximum(deg, 1.0)
     for _ in range(iters):
         acc = cp.zeros((n, 3), dtype=cp.float64)
         cp.add.at(acc, e[:, 0], v[e[:, 1]])
         cp.add.at(acc, e[:, 1], v[e[:, 0]])
         avg = acc / deg[:, None]
-        v = cp.where(fx[:, None], v, v * (1.0 - lam) + avg * lam)
+        v = cp.where(hold[:, None], v, v * (1.0 - lam) + avg * lam)
     return cp.asnumpy(v)
 
 
@@ -193,13 +236,15 @@ def _smooth_torch(verts, edges, fixed, iters, lam):
     ones = torch.ones(len(edges), dtype=torch.float64, device=dev)
     deg.index_add_(0, e[:, 0], ones)
     deg.index_add_(0, e[:, 1], ones)
+    # 孤立顶点保持不动（与 CPU 路径一致）
+    hold = torch.as_tensor(fixed, device=dev) | (deg <= 0.0)
     deg = deg.clamp(min=1.0)
     for _ in range(iters):
         acc = torch.zeros((n, 3), dtype=torch.float64, device=dev)
         acc.index_add_(0, e[:, 0], v[e[:, 1]])
         acc.index_add_(0, e[:, 1], v[e[:, 0]])
         avg = acc / deg.unsqueeze(1)
-        v = torch.where(fx.unsqueeze(1), v, v * (1.0 - lam) + avg * lam)
+        v = torch.where(hold.unsqueeze(1), v, v * (1.0 - lam) + avg * lam)
     return v.cpu().numpy()
 
 

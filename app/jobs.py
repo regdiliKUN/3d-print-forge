@@ -177,28 +177,45 @@ class Job:
         self.logs: list[str] = []
         self.steps: dict[str, dict] = {}
         self.waiting_resource = False
+        self._paused_queued = False   # 是否「排队中被暂停」（从未被工作线程取走）
         self._worker: Worker | None = None
         self._pause_evt = threading.Event()
         self._pause_evt.set()
         self._cancel_evt = threading.Event()
         self._last_touch = time.time()
+        # 固定本任务写入的文件：测试会把 JOB_FILE 指到临时目录，后台残留线程
+        # 若在指针切换后写，会把别的测试的记录混进来（实测并发用例 6 条变 7 条）。
+        # 生产环境 JOB_FILE 是常量，这样写也避免运行期改配置影响已建任务。
+        self._job_file = JOB_FILE
 
     def _touch(self) -> None:
         self._last_touch = time.time()
 
     def _persist(self) -> None:
+        """把本任务快照并进 jobs.json。
+
+        三个并发细节，少一个都会丢数据：
+        1. 多个工作线程同时「读整个文件 → 改一条 → 写回」，后写的会覆盖先写的，
+           实测 6 个任务各写 30 次，最终只剩 4 条记录。必须串行化。
+        2. 临时文件名不能共用：两个线程都写 jobs.tmp，A 还没 replace 完 B 已经
+           把 jobs.tmp 覆盖成自己的内容，A 的 replace 就会把 B 的内容当成自己的。
+           每个任务用独立临时文件。
+        3. 写入失败不能影响任务本身，所以整体仍吞异常。
+        """
         try:
-            JOB_FILE.parent.mkdir(parents=True, exist_ok=True)
-            all_jobs = {}
-            if JOB_FILE.exists():
-                try:
-                    all_jobs = json.loads(JOB_FILE.read_text(encoding="utf-8"))
-                except Exception:
-                    all_jobs = {}
-            all_jobs[self.id] = self.to_dict(light=True)
-            tmp = JOB_FILE.with_suffix(".tmp")
-            tmp.write_text(json.dumps(all_jobs, ensure_ascii=False, indent=1), encoding="utf-8")
-            os.replace(tmp, JOB_FILE)
+            job_file = getattr(self, "_job_file", JOB_FILE)
+            job_file.parent.mkdir(parents=True, exist_ok=True)
+            with _PERSIST_LOCK:
+                all_jobs = {}
+                if job_file.exists():
+                    try:
+                        all_jobs = json.loads(job_file.read_text(encoding="utf-8"))
+                    except Exception:
+                        all_jobs = {}
+                all_jobs[self.id] = self.to_dict(light=True)
+                tmp = job_file.with_name(f"{job_file.name}.{self.id}.tmp")
+                tmp.write_text(json.dumps(all_jobs, ensure_ascii=False, indent=1), encoding="utf-8")
+                os.replace(tmp, job_file)
         except Exception:
             pass
 
@@ -241,6 +258,8 @@ class Job:
 
 
 JOB_FILE = config.STATE / "jobs.json"
+# jobs.json 是「读-改-写」型共享文件，所有写入必须串行
+_PERSIST_LOCK = threading.RLock()
 
 Worker = Callable[[JobContext, dict], dict]
 
@@ -294,8 +313,19 @@ class JobManager:
         if not j or j.status not in ("running", "queued"):
             return False
         j._pause_evt.clear()
+        was_queued = j.status == "queued"
         j.status = "paused"
         j.message = "已暂停，可随时恢复"
+        if was_queued:
+            # 还在排队就暂停的任务要从队列里摘出来。留着的话调度器会把它取走，
+            # 工作线程随即卡在 tick 的暂停循环里——一个被暂停的任务白占一个
+            # 工作线程，暂停两个就把 2 线程的池占满，其余任务全部排不进来。
+            with self._lock:
+                try:
+                    self._queue.remove(j.id)
+                except ValueError:
+                    pass
+                j._paused_queued = True
         return True
 
     def resume(self, jid: str) -> bool:
@@ -304,8 +334,18 @@ class JobManager:
             return False
         if j.status == "paused":
             j._pause_evt.set()
-            j.status = "running"
-            j.message = "已恢复"
+            if j._paused_queued:
+                # 从没被调度过：重新排队，等空闲工作线程来取
+                j._paused_queued = False
+                j.status = "queued"
+                j.message = "已恢复，等待执行"
+                with self._lock:
+                    if j.id not in self._queue:
+                        self._queue.append(j.id)
+                        self._cv.notify()
+            else:
+                j.status = "running"
+                j.message = "已恢复"
             return True
         # 失败/取消的任务 → 重新入队，从断点继续
         if j.status in ("failed", "cancelled"):
@@ -326,12 +366,15 @@ class JobManager:
             return False
         j._cancel_evt.set()
         j._pause_evt.set()
-        if j.status == "queued":
+        # 排队中 / 排队中被暂停：都不在任何线程里跑，直接标记取消
+        idle = j.status == "queued" or (j.status == "paused" and j._paused_queued)
+        if idle:
             with self._lock:
                 try:
                     self._queue.remove(j.id)
                 except ValueError:
                     pass
+            j._paused_queued = False
             j.status = "cancelled"
             j.finished = _now()
         return True
@@ -342,7 +385,9 @@ class JobManager:
             while self._queue:
                 jid = self._queue.popleft()
                 j = self._jobs.get(jid)
-                if j and j.status in ("queued", "paused"):
+                # 只取 queued：paused 的任务可能已经在线程里跑着（不能重复取），
+                # 也可能是排队中被暂停（不该占线程），两种都不能在这里放行
+                if j and j.status == "queued":
                     return j
             return None
 

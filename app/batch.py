@@ -32,24 +32,33 @@ def process_one(pid: str, tpl: dict, on_progress=None) -> dict:
         raise BatchError("load", f"模型文件缺失：{path.name}")
 
     try:
-        mesh = meshio.load_mesh(path)
+        mesh = meshio.load_mesh(path, mutable=True)
     except Exception as e:
         raise BatchError("load", f"无法解析网格：{e}") from e
 
     # ---- 检测
     try:
+        # 必须走和单件检测同一套异常隔离（_safe_check）：一项抛异常不能让整个
+        # 批处理项失败，否则「某个模型的自交检测崩了」会连累其余六项结论。
         items = [
-            fn(mesh, {"sample_faces": int(tpl.get("sample_faces", 3000)),
-                      "check_self_intersection": bool(tpl.get("check_self_intersection", True))})
+            analysis._safe_check(
+                fn, mesh,
+                {"sample_faces": int(tpl.get("sample_faces", 3000)),
+                 "check_self_intersection": bool(tpl.get("check_self_intersection", True))},
+            )
             for fn in analysis.CHECKS
         ]
         summary = analysis.summarize(items)
+        stats = meshio.mesh_stats(mesh)
         report = {
             "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "file": path.name,
-            "stats": meshio.mesh_stats(mesh),
+            "stats": stats,
             "items": items,
             "summary": summary,
+            # 批量报告以前没有 quality：批完打开项目详情，质量评分是空的
+            "quality": analysis.quality_score({"items": items, "stats": stats}),
+            "failed_checks": [i.get("id") for i in items if (i.get("value") or {}).get("error")],
         }
         store.update(pid, analysis=report)
     except Exception as e:
@@ -57,14 +66,20 @@ def process_one(pid: str, tpl: dict, on_progress=None) -> dict:
 
     # ---- 修复
     repaired: list[str] = []
+    reverted: list[dict] = []
     actions = repair.normalize_order(list(tpl.get("repair_actions") or []))
     for name in actions:
         fn = repair.ACTIONS.get(name)
         if fn is None:
             continue
         try:
-            mesh, _ = fn(mesh, tpl)
-            repaired.append(name)
+            mesh, info = fn(mesh, tpl)
+            # 回退的动作不能记成「已修复」：批量报告是用户唯一的依据，
+            # 写着「补洞已完成」而实际原样返回，等于把失败伪装成成功。
+            if isinstance(info, dict) and info.get("reverted"):
+                reverted.append({"action": name, "reason": info.get("revert_reason", "")[:200]})
+            else:
+                repaired.append(name)
         except Exception as e:
             raise BatchError("repair", f"修复动作 {name} 失败：{e}") from e
 
@@ -97,7 +112,9 @@ def process_one(pid: str, tpl: dict, on_progress=None) -> dict:
         "status": "ok",
         "output": str(out),
         "repaired": repaired,
+        "reverted": reverted,
         "analysis": summary,
+        "quality": report["quality"],
         "process": prep,
         "advice_summary": adv.get("summary"),
         "warnings": adv.get("warnings", []),
