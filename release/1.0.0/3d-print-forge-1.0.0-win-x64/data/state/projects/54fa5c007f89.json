@@ -1,0 +1,40 @@
+{
+  "id": "54fa5c007f89",
+  "name": "示例模型（破洞 / 薄壁 / 碎屑）",
+  "created": "2026-10-22T19:35:24+00:00",
+  "updated": "2026-10-22T19:35:25+00:00",
+  "source": "I:\\PrinterApp\\data\\uploads\\demo_55a311cd.stl",
+  "original": "I:\\PrinterApp\\data\\uploads\\demo_55a311cd.stl",
+  "current": "I:\\PrinterApp\\data\\outputs\\54fa5c007f89_processed_1792697725.stl",
+  "history": [
+    {
+      "at": "2026-10-22T19:35:25+00:00",
+      "action": "process",
+      "params": {
+        "decimate_ratio": 1.0,
+        "hollow": false,
+        "wall_thickness": 2.0,
+        "drain_holes": 2,
+        "hole_diameter": 3.0,
+        "supports": "auto",
+        "support_points": [],
+        "support_diameter": 1.0,
+        "support_spacing": 3.0,
+        "overhang_deg": 45.0,
+        "orient": true,
+        "scale": 1.0,
+        "target_height": 0.0,
+        "target_max_dim": 0.0
+      },
+      "out": "I:\\PrinterApp\\data\\outputs\\54fa5c007f89_processed_1792697725.stl",
+      "note": "减面×1.0 镂空=False 支撑=auto"
+    }
+  ],
+  "analysis": null,
+  "advice": null,
+  "stats": {},
+  "tags": [
+    "示例"
+  ],
+  "favorite": false
+}

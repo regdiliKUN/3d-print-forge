@@ -1,0 +1,4 @@
+# 可选：GPU 加速（仅 NVIDIA CUDA 12.x 机器需要）。
+# cupy-cuda12x[ctk] 连 CUDA 头文件一起装，否则 cupy 只能探测到卡、无法编译内核。
+# 不装也能跑，代码会自动退回 CPU（app/gpu.py）。
+cupy-cuda12x[ctk]>=13.0

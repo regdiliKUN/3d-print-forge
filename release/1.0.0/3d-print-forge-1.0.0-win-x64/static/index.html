@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D Print Forge · 模型处理工具集</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f6e56'/%3E%3Cpath d='M16 5l10 6v10l-10 6-10-6V11z' fill='%235dcaa5'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark"></span>
+    <span class="brand-name">3D Print Forge</span>
+    <span class="brand-sub">导入 → 检测 → 修复 → 处理 → 建议 → 导出</span>
+    <button class="help-btn" id="btn-help" title="帮助与快捷键（?）">?</button>
+  </div>
+
+  <div class="gauge">
+    <div class="gauge-top">
+      <span id="gauge-stage">空闲</span>
+      <span id="gauge-eta"></span>
+    </div>
+    <div class="gauge-track"><div id="gauge-fill"></div></div>
+    <div class="gauge-foot">
+      <span id="gauge-pct">0%</span>
+      <div class="gauge-actions">
+        <button id="btn-pause" class="mini" disabled>暂停</button>
+        <button id="btn-cancel" class="mini" disabled>中断</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="resmon" id="resmon">
+    <div class="res-row"><span>CPU</span><div class="res-track"><i id="res-cpu"></i></div><b id="res-cpu-v">--</b></div>
+    <div class="res-row"><span>内存</span><div class="res-track"><i id="res-mem"></i></div><b id="res-mem-v">--</b></div>
+    <div class="res-row"><span>GPU</span><b id="res-gpu" class="res-gpu">检测中</b></div>
+  </div>
+</header>
+
+<div class="shell">
+  <nav class="steps" id="steps"></nav>
+
+  <main class="stage" id="stage">
+    <div class="empty-state">
+      <div class="empty-ring"></div>
+      <h2>把 STL 拖进来开始</h2>
+      <p>也可以点下面的按钮选择文件。原文件不会被修改，所有操作都作用在工作副本上。</p>
+      <button class="primary" id="btn-pick">选择模型文件</button>
+    </div>
+  </main>
+
+  <aside class="inspector" id="inspector">
+    <div class="insp-title">任务队列</div>
+    <div id="queue" class="queue-empty">暂无任务</div>
+  </aside>
+</div>
+
+<div class="dropveil" id="dropveil"><div>松手即导入</div></div>
+<div class="toasts" id="toasts"></div>
+<input type="file" id="file-input" accept=".stl,.obj,.ply,.3mf" multiple hidden>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
