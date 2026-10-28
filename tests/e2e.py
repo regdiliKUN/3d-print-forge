@@ -29,10 +29,10 @@ FAIL: list[str] = []
 def check(name: str, cond: bool, detail: str = "") -> None:
     if cond:
         PASS.append(name)
-        print(f"  ✔ {name}" + (f"  {detail}" if detail else ""))
+        print(f"  [OK] {name}" + (f"  {detail}" if detail else ""))
     else:
         FAIL.append(name)
-        print(f"  ✖ {name}  {detail}")
+        print(f"  [FAIL] {name}  {detail}")
 
 
 def wait_job(client: TestClient, jid: str, timeout: float = 180.0) -> dict:
@@ -98,7 +98,7 @@ def run() -> int:
         check("修复任务完成", j["status"] == "done", j.get("error") or "")
         after = j["result"]["after"]
         check("修复后水密", after["is_watertight"] is True)
-        check("修复后体积为正", after["volume_mm3"] > 0, f"{after['volume_mm3']:.0f} mm³")
+        check("修复后体积为正", after["volume_mm3"] > 0, f"{after['volume_mm3']:.0f} mm3")
 
         # ---------------- 4. 复检
         j = wait_job(client, client.post(f"/api/projects/{pid}/analyze", json={}).json()["id"])
@@ -128,7 +128,7 @@ def run() -> int:
         check("面数控制在可切片范围", j["result"]["after"]["faces"] < 60000,
               f"{j['result']['before']['faces']} → {j['result']['after']['faces']} 面")
         check("镂空后体积小于实心", j["result"]["after"]["volume_mm3"] < j["result"]["before"]["volume_mm3"],
-              f"{j['result']['before']['volume_mm3']:.0f} → {j['result']['after']['volume_mm3']:.0f} mm³")
+              f"{j['result']['before']['volume_mm3']:.0f} → {j['result']['after']['volume_mm3']:.0f} mm3")
 
         # ---------------- 6. 预览接口
         m = client.get(f"/api/projects/{pid}/mesh?max_faces=20000").json()
