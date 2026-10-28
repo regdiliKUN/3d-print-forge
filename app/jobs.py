@@ -213,6 +213,18 @@ class Job:
                     except Exception:
                         all_jobs = {}
                 all_jobs[self.id] = self.to_dict(light=True)
+                # 历史记录无限增长会让 jobs.json 在长期使用后拖慢每次进度写入。
+                # 只保留最近 300 条终态记录；运行中的任务永远保留。
+                if len(all_jobs) > 300:
+                    terminal = ("done", "failed", "cancelled")
+                    keep = [(k, v) for k, v in all_jobs.items()
+                            if (v or {}).get("status") not in terminal]
+                    old = sorted(
+                        ((k, v) for k, v in all_jobs.items() if (v or {}).get("status") in terminal),
+                        key=lambda kv: (kv[1] or {}).get("created") or "", reverse=True,
+                    )[: max(0, 300 - len(keep))]
+                    all_jobs = dict(old + keep)
+                    all_jobs[self.id] = self.to_dict(light=True)
                 tmp = job_file.with_name(f"{job_file.name}.{self.id}.tmp")
                 tmp.write_text(json.dumps(all_jobs, ensure_ascii=False, indent=1), encoding="utf-8")
                 os.replace(tmp, job_file)
@@ -268,6 +280,7 @@ Worker = Callable[[JobContext, dict], dict]
 class JobManager:
     def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
+        self._history: dict[str, dict] = {}
         self._queue: deque[str] = deque()
         self._lock = threading.RLock()
         self._workers: list[threading.Thread] = []
@@ -276,7 +289,53 @@ class JobManager:
 
     # -- 生命周期 --------------------------------------------------
     def start(self) -> None:
+        self._load_history()
         self._scale_workers()
+
+    def _load_history(self) -> None:
+        """启动时恢复上次运行的任务快照。
+
+        以前 jobs.json 只写不读：重启后任务列表一片空白，用户以为记录丢了。
+        进程重启时不可能还在跑的任务，统一标成 failed/interrupted，并给出可读原因，
+        而不是让一条「running 47%」永远停在界面上。
+        """
+        if not JOB_FILE.exists():
+            return
+        try:
+            raw = json.loads(JOB_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(raw, dict):
+            return
+        restored: dict[str, dict] = {}
+        for jid, rec in raw.items():
+            if not isinstance(rec, dict) or not rec.get("id"):
+                continue
+            rec = dict(rec)
+            if rec.get("status") not in ("done", "failed", "cancelled"):
+                rec["status"] = "failed"
+                rec["error"] = rec.get("error") or "服务重启，任务已中断，请重新运行"
+                rec["message"] = "服务重启，任务已中断"
+                rec["progress"] = min(float(rec.get("progress") or 0), 0.99)
+                rec["finished"] = rec.get("finished") or rec.get("created")
+                rec["interrupted"] = True
+            rec.pop("params", None)
+            rec.pop("logs", None)
+            restored[str(rec["id"])] = rec
+        ordered = sorted(restored.values(), key=lambda x: x.get("created") or "", reverse=True)[:200]
+        self._history = {str(r["id"]): r for r in ordered}
+
+    def history(self) -> list[dict]:
+        with self._lock:
+            return [dict(v) for v in self._history.values()]
+
+    def get_snapshot(self, jid: str) -> dict | None:
+        """实时任务优先；已结束的历史任务返回持久化快照。"""
+        j = self._jobs.get(jid)
+        if j is not None:
+            return j.to_dict()
+        rec = self._history.get(jid)
+        return dict(rec) if rec else None
 
     def _scale_workers(self) -> None:
         want = config.get().runtime.max_workers
@@ -305,7 +364,10 @@ class JobManager:
 
     def list(self) -> list[dict]:
         with self._lock:
-            return [j.to_dict() for j in sorted(self._jobs.values(), key=lambda x: x.created, reverse=True)]
+            live = [j.to_dict() for j in self._jobs.values()]
+            seen = {d["id"] for d in live}
+            merged = live + [dict(v) for k, v in self._history.items() if k not in seen]
+            return sorted(merged, key=lambda x: x.get("created") or "", reverse=True)
 
     # -- 控制 ------------------------------------------------------
     def pause(self, jid: str) -> bool:
@@ -479,3 +541,66 @@ MANAGER = JobManager()
 
 def submit(kind: str, title: str, params: dict, worker: Worker, project_id: str | None = None) -> Job:
     return MANAGER.submit(kind, title, params, worker, project_id)
+
+
+# ---------------------------------------------------------------- 中间产物回收
+def cleanup_orphan_tmp(max_age_days: float = 7.0) -> dict:
+    """回收 `state/tmp/<job_id>/` 里已经没人会再用的中间产物。
+
+    修复任务会把每一步的结果存成 `NN_action.stl`，用来「取消后从断点续跑」，
+    所以取消/失败时**不能**删——删了就续不上。代价是这些目录只增不减：
+    一个 200MB 的模型，跑一次修复就留 200MB，反复调参数能堆到几个 GB，
+    而且删项目、删任务都不会碰它们。
+
+    回收规则（保守，只删确定没用的）：
+      1. 目录名对应的任务在 jobs.json 里已经不存在（记录被清掉/项目被删）
+      2. 任务已 done 或 cancelled（终态，不会再续跑）
+      3. 目录超过 max_age_days 天没动过
+    """
+    import shutil
+
+    root = config.STATE / "tmp"
+    if not root.exists():
+        return {"scanned": 0, "removed": 0, "freed_mb": 0.0, "kept": 0}
+    alive: dict[str, str] = {}
+    try:
+        if JOB_FILE.exists():
+            data = json.loads(JOB_FILE.read_text(encoding="utf-8"))
+            for jid, rec in (data or {}).items():
+                alive[str(jid)] = str((rec or {}).get("status") or "")
+    except Exception:
+        alive = {}
+
+    import time as _time
+
+    now = _time.time()
+    scanned = removed = kept = 0
+    freed = 0.0
+    for d in root.iterdir():
+        if not d.is_dir():
+            continue
+        scanned += 1
+        status = alive.get(d.name)
+        try:
+            age_days = (now - d.stat().st_mtime) / 86400.0
+        except OSError:
+            age_days = 0.0
+        drop = False
+        if status is None:
+            drop = True                      # 任务记录都没了，不可能再续跑
+        elif status in ("done", "cancelled"):
+            drop = True
+        elif age_days > max_age_days:
+            drop = True
+        if not drop:
+            kept += 1
+            continue
+        try:
+            size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+            shutil.rmtree(d, ignore_errors=True)
+            removed += 1
+            freed += size / 1048576.0
+        except OSError:
+            kept += 1
+    return {"scanned": scanned, "removed": removed,
+            "freed_mb": round(freed, 1), "kept": kept}

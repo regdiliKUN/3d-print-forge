@@ -509,9 +509,36 @@ def _sections_cached(path: Path, mesh, samples: int = SECTIONS_SAMPLES) -> tuple
     return sec
 
 
+def _truthy(v, default: bool = True) -> bool:
+    """把 JSON/表单里五花八门的「假」统一认成假。
+
+    前端传的是布尔，但批量模板、导入的 JSON、脚本调用传的是字符串：
+    bool("false") 是 True、bool("0") 也是 True——于是用户明确关掉了
+    「按本机历史校正」，算出来的却仍是校正后的数，而且看不出被改过。
+    """
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v) and v == v  # NaN → False
+    s = str(v).strip().lower()
+    if s in ("1", "true", "yes", "on", "y", "t"):
+        return True
+    if s in ("0", "false", "no", "off", "n", "f", ""):
+        return False
+    return default
+
+
 def _geometry(project: dict) -> dict:
     """汇总所有用于决策的几何量，并保证每项都有值。"""
     report = project.get("analysis") or {}
+    # 报告过期（几何改过但没重新检测）时，stats/items 里的数字属于上一版文件。
+    # 继续用它们会算出「20mm 立方体缩到 60mm 仍按 9.9g 估耗材」这种 8 倍偏差，
+    # 所以这里直接丢掉旧报告，改从当前文件重新量。
+    stale = bool(project.get("analysis_stale"))
+    if stale:
+        report = {}
     stats = report.get("stats") or {}
     items = {i.get("id"): i for i in (report.get("items") or [])}
     path = Path(project.get("current") or project.get("source") or "")
@@ -520,6 +547,7 @@ def _geometry(project: dict) -> dict:
     support: dict = {}
     profile: dict = {}
     has_mesh = False
+    mesh = None
     if path.exists():
         try:
             mesh = _load_mesh_cached(path)
@@ -535,11 +563,33 @@ def _geometry(project: dict) -> dict:
         except Exception:
             pass
 
+    components = ((items.get("components") or {}).get("value") or {}).get("components")
+    if components is None and has_mesh:
+        # 报告里没有（或已过期）时，部件数别直接当 1：
+        # 「1 个连通体」是结论，不是缺省值。多部件会影响支撑与用料估算，
+        # 也会漏掉「切片时各自生成支撑」这条提醒。
+        try:
+            n_comp, _labels = analysis.union_components(
+                np.asarray(mesh.faces), len(mesh.vertices))
+            components = int(n_comp)
+        except Exception:  # noqa: BLE001
+            components = None
+
     thick = (items.get("thickness") or {}).get("value") or {}
     min_wall, wall_note = _clean_wall(thick)
+    if stale and has_mesh:
+        # 报告过期就当场补一次粗筛测厚：不补的话「最薄处」这一项会缺失，
+        # 层高与「细节打不出来」的判断就整条失效，而这恰恰是最常见的打印失败原因。
+        try:
+            quick = analysis.check_thickness(mesh, {"sample_faces": 600}, None)
+            min_wall, wall_note = _clean_wall(quick.get("value") or {})
+        except Exception:  # noqa: BLE001
+            min_wall, wall_note = None, "检测报告已过期，补测壁厚失败"
     ext = stats.get("extents") or [0, 0, 0]
     return {
         "extents": ext,
+        "stale": stale,
+        "geometry_source": "recomputed" if stale else ("report" if report else "mesh"),
         "max_dim": float(max(ext)) if ext else 0.0,
         "height": float(ext[2]) if len(ext) > 2 else 0.0,
         "volume_mm3": float(stats.get("volume_mm3") or 0.0),
@@ -550,7 +600,8 @@ def _geometry(project: dict) -> dict:
         "wall_note": wall_note,
         "overhang_ratio": round(overhang, 4),
         "watertight": bool(stats.get("is_watertight")),
-        "components": ((items.get("components") or {}).get("value") or {}).get("components", 1),
+        "components": components if components is not None else 1,
+        "components_known": components is not None,
         "has_mesh": has_mesh,
         "support": support,
         "profile": profile,
@@ -812,10 +863,18 @@ def _sources(g: dict, printer: dict, process: str, mat: dict, cal: dict) -> list
             f"拉伸强度 {mat.get('tensile')} MPa（层间折减 ×{mat.get('z_factor')}）",
         ]
 
-    if cal and cal.get("source") != "prior":
+    if cal and cal.get("source") == "group":
         base.append(
             f"本机历史修正：{process}/{printer.get('name')}/{mat.get('name')} "
             f"已攒 {cal.get('n')} 条记录，耗材与时长按实测偏差校正"
+        )
+    elif cal and cal.get("source") == "sparse":
+        # 1~2 条记录时权重只有 1/9~2/10，改动力度极小。
+        # 说成「已按实测偏差校正」会让用户高估这份建议的本地化程度。
+        base.append(
+            f"本机仅 {cal.get('n')} 条同机型同材料记录，样本不足，"
+            f"只做极小幅度校正（×{cal.get('factor')}，权重 {cal.get('n')}/"
+            f"{int(cal.get('n') or 0) + 8}）"
         )
     else:
         base.append("本机暂无打印记录，未做历史修正（纯物理估算）")
@@ -849,6 +908,9 @@ def _confidence(g: dict, conflict: float, model_gap: float, cal: dict) -> dict:
     if not g.get("has_mesh"):
         score -= 0.20
         reasons.append("未加载到模型文件，几何量取自缓存报告（−0.20）")
+    if g.get("stale"):
+        score -= 0.10
+        reasons.append("检测报告已过期，几何量已按当前文件重测（−0.10）")
     if not g.get("watertight"):
         score -= 0.15
         reasons.append("模型不水密，体积与壁厚数据不可靠（−0.15）")
@@ -868,6 +930,11 @@ def _confidence(g: dict, conflict: float, model_gap: float, cal: dict) -> dict:
     if not (g.get("profile") or {}).get("ok"):
         score -= 0.10
         reasons.append("截面轮廓采样失败，FDM 时长退回体积法（−0.10）")
+    if not (g.get("support") or {}).get("ok"):
+        # 支撑是「能不能打出来」的前置判断，没判定就不能算一份可信的建议
+        score -= 0.12
+        why = (g.get("support") or {}).get("reason") or "未加载到模型文件"
+        reasons.append(f"悬垂/支撑未判定（{why}），支撑结论为空（−0.12）")
     if g.get("degenerate"):
         score -= 0.35
         reasons.append("模型退化（无实体/无厚度），参数不具备可打印性（−0.35）")
@@ -1014,6 +1081,12 @@ def recommend(project: dict, overrides: dict | None = None) -> dict:
     # 选了具体机型就以机型的工艺为准，避免「FDM 机型 + 光固化参数」这种自相矛盾的组合
     process = printer["process"] if printer.get("resolved_from") == "preset" else (
         process_hint or printer["process"])
+    # 机型 key 没命中预设时会退回该工艺的默认机型。参数照样算得出来，
+    # 但那台机器不是用户选的那台——成型空间、照度、喷嘴全都不一样。
+    # 不说明的话，用户会以为屏幕上的参数是给自己机器的。
+    printer_fallback = None
+    if printer.get("resolved_from") != "preset" and (ov.get("printer") or "").strip():
+        printer_fallback = str(ov.get("printer")).strip()
     nozzle_warn = (_resolve_nozzle(printer, _f(ov.get("nozzle"), 0.0))
                    if process == "FDM" else None)
 
@@ -1026,6 +1099,27 @@ def recommend(project: dict, overrides: dict | None = None) -> dict:
     warnings: list[str] = []
     rationale: list[str] = []
     bx, by, bz = printer["build"]
+
+    if printer_fallback:
+        warnings.append(
+            f"没有机型预设「{printer_fallback}」，已按 {printer['name']} 的参数计算"
+            f"（成型空间 {bx:g}×{by:g}×{bz:g}mm）。"
+            f"换成你自己的机型后，成型空间、照度/喷嘴、时长都会变——请先在机型里重选。"
+        )
+        rationale.append(f"机型「{printer_fallback}」不存在 → 退回默认机型 {printer['name']}")
+
+    # 材料 key 与工艺不匹配时（例如切了工艺但材料还停在另一种），
+    # 会静默落到该工艺的默认材料。数字是自洽的，但用户以为自己在用另一种料。
+    material_fallback = None
+    table = SLA_MATERIALS if process == "SLA" else FDM_MATERIALS
+    if material_key not in table:
+        material_fallback = material_key
+        material_key = "standard" if process == "SLA" else "PLA"
+        warnings.append(
+            f"材料「{material_fallback}」不属于 {process} 工艺，已按 {table[material_key]['name']} 计算。"
+            f"可选：{'、'.join(sorted(table))}。"
+        )
+        rationale.append(f"材料「{material_fallback}」不在 {process} 材料表内 → 用 {material_key}")
 
     # ---- 工艺与材料
     if process == "SLA":
@@ -1208,6 +1302,20 @@ def recommend(project: dict, overrides: dict | None = None) -> dict:
         rationale.append(
             f"悬垂 {oratio * 100:.1f}% 未过阈值，"
             f"剩余 {contact:.0f}mm² 可按需补支撑 → 支撑可选")
+    elif not sup.get("ok"):
+        # 「没测出来」不能写成「自支撑性良好」。支撑结论依赖向下射线与截面遮挡判定，
+        # 模型没加载到、截面切不出来、采样失败时这些都没跑，
+        # 这时给出「不需要支撑」等于让用户拿一个未经验证的结论去打印。
+        why = sup.get("reason") or ("未加载到模型文件" if not g.get("has_mesh") else "悬垂判定未完成")
+        params.append({
+            "key": "supports", "label": "支撑", "value": "未评估", "unit": "",
+            "reason": (
+                f"{why}，无法判定是否需要支撑。"
+                f"请先确认模型文件可读并重新检测，或直接在切片软件里看悬垂预览。"
+            ),
+        })
+        warnings.append(f"支撑结论未评估：{why}。不要据此认为模型不需要支撑。")
+        rationale.append(f"悬垂判定未完成（{why}）→ 支撑标为未评估，不给结论")
     else:
         params.append({
             "key": "supports", "label": "支撑", "value": "可选", "unit": "",
@@ -1238,6 +1346,13 @@ def recommend(project: dict, overrides: dict | None = None) -> dict:
         rationale.append(f"高度 {_f(g['height']):.0f}mm 接近上限 {bz}mm → 支撑与取件勉强")
 
     # ---- 质检前置条件
+    if g.get("stale"):
+        warnings.append(
+            "模型在上次检测之后被修改过（缩放/旋转/打孔/处理等），检测报告已过期。"
+            "这里的几何量是按当前文件重新测量的，但水密性、自相交等结论仍是旧的——"
+            "建议先重新检测再照着打。"
+        )
+        rationale.append("检测报告已过期 → 几何量按当前文件重测，结论项不采信旧报告")
     if not g["watertight"]:
         warnings.append("模型当前不水密。切片软件可能拒绝切片或生成错误截面，请先执行补洞。")
         rationale.append("模型不水密 → 建议先补洞再切片")
@@ -1290,7 +1405,7 @@ def recommend(project: dict, overrides: dict | None = None) -> dict:
     mc = _mc_interval(_cost_with)
 
     # ---- 本机历史标定
-    use_cal = ov.get("calibrate", True)
+    use_cal = _truthy(ov.get("calibrate"), True)
     cal_h = calibration.estimate(process, printer_key, material_key, "hours")
     cal_g = calibration.estimate(process, printer_key, material_key, "grams")
     if use_cal:
@@ -1301,8 +1416,11 @@ def recommend(project: dict, overrides: dict | None = None) -> dict:
             band["p10"] = round(band["p10"] * cal["factor"] * cal["lo_mult"], 2 if key == "hours" else 1)
             band["p50"] = round(band["p50"] * cal["factor"], 2 if key == "hours" else 1)
             band["p90"] = round(band["p90"] * cal["factor"] * cal["hi_mult"], 2 if key == "hours" else 1)
-        cost["basis"] += (f"；本机历史修正 ×{cal_h['factor']}（时长）/ "
-                          f"×{cal_g['factor']}（耗材），各 {cal_h['n']}/{cal_g['n']} 条记录")
+        if cal_h["factor"] != 1.0 or cal_g["factor"] != 1.0:
+            cost["basis"] += (f"；本机历史修正 ×{cal_h['factor']}（时长）/ "
+                              f"×{cal_g['factor']}（耗材），各 {cal_h['n']}/{cal_g['n']} 条记录")
+        else:
+            cost["basis"] += "；本机暂无可用记录，未做历史修正"
 
     # ---- 退化模型：这类输入不该给出「正常参数」，否则用户会以为能打
     degenerate = None
@@ -1351,19 +1469,82 @@ def recommend(project: dict, overrides: dict | None = None) -> dict:
     g["feasible"] = feasible
     confidence = _confidence(g, conflict, model_gap, cal_h)
 
+    # ---- 一屏可打印性：把「阻断」和「提醒」分开，用户不必读完整份建议才知道能不能打
+    wall_ok = None
+    wall_detail = "壁厚未测"
+    if g.get("min_wall") is not None:
+        need = (_f(printer.get("xy_res"), 0.05) * 2) if process == "SLA" else _f(printer.get("nozzle"), 0.4)
+        wall_ok = _f(g["min_wall"]) >= need
+        wall_detail = f"最薄 {_f(g['min_wall']):.2f}mm，建议 ≥ {need:.2f}mm"
+    support_detail = (
+        f"悬垂 {oratio * 100:.1f}%，需支撑面约 {contact:.0f}mm²"
+        if sup.get("ok") else f"未判定：{sup.get('reason') or '模型未加载'}"
+    )
+    checks = [
+        {"key": "fit", "label": "成型空间", "ok": bool(fits),
+         "detail": "可放入" if fits else str(fit_reason)},
+        {"key": "watertight", "label": "水密性", "ok": bool(g.get("watertight")),
+         "detail": "水密" if g.get("watertight") else "有开放边/破面，切片可能失败"},
+        # 没判定 ≠ 判定不通过：前者是「没测」，后者是「测了不行」。
+        # 界面上前者画「?」，后者画「✕」，混成一个会让用户以为支撑真的有问题。
+        {"key": "support", "label": "支撑判定",
+         "ok": True if sup.get("ok") else None,
+         "detail": support_detail},
+        {"key": "wall", "label": "最薄壁厚", "ok": wall_ok, "detail": wall_detail},
+    ]
+    blockers: list[dict] = []
+    if degenerate:
+        blockers.append({"key": "geometry", "text": str(degenerate)})
+    if not fits:
+        blockers.append({"key": "fit", "text": f"放不进成型空间：{fit_reason}"})
+    if not g.get("watertight"):
+        blockers.append({"key": "watertight", "text": "模型不水密，请先补洞再导出切片"})
+    if not sup.get("ok"):
+        blockers.append({"key": "support", "text": f"支撑未判定：{sup.get('reason') or '模型未加载'}"})
+    if wall_ok is False:
+        blockers.append({"key": "wall", "text": f"最薄处 {_f(g['min_wall']):.2f}mm 低于可打印下限"})
+    if blockers:
+        status, status_label = "blocked", "暂不可直接打印"
+    elif warnings:
+        status, status_label = "caution", "可打印，但有小风险"
+    else:
+        status, status_label = "ready", "可直接打印"
+    printability = {
+        "status": status,
+        "label": status_label,
+        "blockers": blockers,
+        "warning_count": len(warnings),
+        "checks": checks,
+    }
+
     if plan_key != DEFAULT_PLAN:
         rationale.append(
             f"方案「{plan['label']}」：层高 ×{plan['layer_mult']}、填充 {plan['infill_delta']:+d}%、"
             f"曝光 ×{plan['exposure_mult']}")
 
     sources = _sources(g, printer, process, mat, cal_h)
-    summary = (
-        f"{printer['name']} / {params[0]['value']}，层高 {lh_val}mm，"
-        f"预估 {cost['grams']}g / {cost['hours']}h"
-        f"（P10–P90：{mc['hours']['p10']}–{mc['hours']['p90']}h）。"
-        f"方案：{plan['label']}，置信度{confidence['grade']}（{confidence['score']}）。"
-        + (f" {len(warnings)} 条风险提示。" if warnings else " 未发现阻断性风险。")
-    )
+    # 结论先行：打不出来的模型，第一句必须是「打不出来」。
+    # 旧文案对空模型是「预估 0.0g / 0.0h（P10–P90：0.0–0.0h）…2 条风险提示」，
+    # 读起来像一份正常的估算，只是数字小；真正的原因被埋在后面的 warnings 里。
+    if degenerate:
+        summary = (
+            f"{printer['name']} / {params[0]['value']}：模型不可打印——{degenerate}。"
+            f"下面的参数与耗材/时长估算都是占位值，不能作为打印依据。"
+        )
+    elif not fits:
+        summary = (
+            f"{printer['name']} / {params[0]['value']}，层高 {lh_val}mm："
+            f"模型放不进成型空间（{fit_reason}），需先分件或换机型。"
+            f"当前预估 {cost['grams']}g / {cost['hours']}h 只在分件后才成立。"
+        )
+    else:
+        summary = (
+            f"{printer['name']} / {params[0]['value']}，层高 {lh_val}mm，"
+            f"预估 {cost['grams']}g / {cost['hours']}h"
+            f"（P10–P90：{mc['hours']['p10']}–{mc['hours']['p90']}h）。"
+            f"方案：{plan['label']}，置信度{confidence['grade']}（{confidence['score']}）。"
+            + (f" {len(warnings)} 条风险提示。" if warnings else " 未发现阻断性风险。")
+        )
     return {
         "process": process,
         "printer": printer_key,
@@ -1374,6 +1555,13 @@ def recommend(project: dict, overrides: dict | None = None) -> dict:
         "cost": cost,
         "summary": summary,
         "plan": plan_key,
+        "printability": printability,
+        # 哪些输入没按用户说的用：界面据此把这些项标黄，而不是静默替换
+        "fallbacks": {
+            "printer": printer_fallback,
+            "material": material_fallback,
+            "plan": (str(ov.get("plan")) if ov.get("plan") and ov.get("plan") not in PLANS else None),
+        },
         "plans": {k: {"label": v["label"], "desc": v["desc"]} for k, v in PLANS.items()},
         "rationale": rationale,
         "sources": sources,

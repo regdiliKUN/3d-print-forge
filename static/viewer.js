@@ -111,19 +111,49 @@ class Viewer {
   _bind() {
     const c = this.renderer.domElement;
     let drag = null;
+    let pinch = null;
+    const pointers = new Map();
+    const distOf = () => {
+      const [a, b] = [...pointers.values()];
+      return Math.hypot(a.x - b.x, a.y - b.y) || 1;
+    };
+    const midOf = () => {
+      const [a, b] = [...pointers.values()];
+      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    };
     c.addEventListener("pointerdown", (e) => {
-      if (this.pickMode && this.onPick) {
+      c.setPointerCapture?.(e.pointerId);
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pointers.size === 2) {
+        drag = null;
+        pinch = { dist: distOf(), mid: midOf(), radius: this.radius, tx: this.target.x, ty: this.target.y, tz: this.target.z };
+        return;
+      }
+      if (this.pickMode && this.onPick && e.pointerType === "mouse") {
         const p = this.pick(e);
         if (p) this.onPick(p);
         return;
       }
-      drag = { x: e.clientX, y: e.clientY, btn: e.button };
-      c.setPointerCapture(e.pointerId);
+      drag = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, btn: e.button, moved: 0 };
     });
     c.addEventListener("pointermove", (e) => {
+      if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pinch && pointers.size >= 2) {
+        const d = distOf();
+        this.radius = Math.max(this.minR || 0.5, Math.min(this.maxR || 50, pinch.radius * (pinch.dist / d)));
+        const m = midOf();
+        const dx = m.x - pinch.mid.x, dy = m.y - pinch.mid.y;
+        const s = this.radius * 0.0016;
+        this.target.x = pinch.tx - dx * s * Math.sin(this.theta);
+        this.target.z = pinch.tz + dx * s * Math.cos(this.theta);
+        this.target.y = pinch.ty + dy * s;
+        this._invalidate();
+        return;
+      }
       if (!drag) return;
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
       drag.x = e.clientX; drag.y = e.clientY;
+      drag.moved += Math.abs(dx) + Math.abs(dy);
       if (drag.btn === 2) {
         const s = this.radius * 0.0016;
         this.target.x -= dx * s * Math.sin(this.theta);
@@ -135,13 +165,36 @@ class Viewer {
       }
       this._invalidate();
     });
-    c.addEventListener("pointerup", () => { drag = null; });
+    const endPointer = (e, cancelled = false) => {
+      // 触摸轻点 = 点选；拖动超过 8px 视为旋转，不触发点选
+      if (!cancelled && this.pickMode && this.onPick && e.pointerType !== "mouse"
+          && drag && drag.moved < 8) {
+        const p = this.pick(e);
+        if (p) this.onPick(p);
+      }
+      pointers.delete(e.pointerId);
+      if (pointers.size < 2) pinch = null;
+      drag = null;
+    };
+    c.addEventListener("pointerup", (e) => endPointer(e));
+    c.addEventListener("pointercancel", (e) => endPointer(e, true));
+    c.addEventListener("dblclick", () => this.resetView());
     c.addEventListener("contextmenu", (e) => e.preventDefault());
     c.addEventListener("wheel", (e) => {
       e.preventDefault();
       this.radius = Math.max(this.minR || 0.5, Math.min(this.maxR || 50, this.radius * (1 + Math.sign(e.deltaY) * 0.12)));
       this._invalidate();
     }, { passive: false });
+  }
+
+  /** 双击或调用时回到「刚载入模型」的视角，防止转丢后只能刷新页面。 */
+  resetView() {
+    if (!this.ok) return;
+    this.theta = 0.9;
+    this.phi = 1.15;
+    this.radius = this._homeR || this.radius;
+    this.target.set(0, 0, 0);
+    this._invalidate();
   }
 
   setGeometry(vb64, ib64) {
@@ -168,6 +221,9 @@ class Viewer {
     const bs = g.boundingSphere;
     this.target.set(0, 0, 0);
     this.radius = bs.radius * 2.6;
+    this._homeR = this.radius;
+    this.theta = 0.9;
+    this.phi = 1.15;
     this.minR = bs.radius * 0.9;
     this.maxR = bs.radius * 12;
     this.camera.near = bs.radius * 0.01;

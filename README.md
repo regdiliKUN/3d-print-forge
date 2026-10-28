@@ -372,8 +372,8 @@ TPF_OVERHANG_DEG=45        # 悬垂角阈值
 ## 测试
 
 ```bash
-.venv/Scripts/python.exe -m pytest tests -q        # 143 项单元测试（实测）
-.venv/Scripts/python.exe bench\round_gate.py      # 28 项几何闸门，约 1.3s
+.venv/Scripts/python.exe -m pytest tests -q        # 420 项单元测试（实测）
+.venv/Scripts/python.exe bench\round_gate.py      # 39 项几何闸门，约 2.0s
 .venv/Scripts/python.exe bench\probe_tritri.py     # 三角-三角精确判定探针 10/10
 .venv/Scripts/python.exe bench\run.py              # 性能基准（44 个阶段）
 ```
@@ -385,14 +385,23 @@ TPF_OVERHANG_DEG=45        # 悬垂角阈值
 | `tests/test_rounds_20_40.py` | 27 | 第 20–40 轮迭代的逐轮回归（自交候选完整性、补丁穿插、薄片、评分封顶、接口校验、并发、缓存隔离） |
 | `tests/test_rounds_41_61.py` | 28 | 第 41–61 轮迭代的逐轮回归（未成环边、壁厚覆盖率、补洞纠朝向、打孔过滤、支撑间距、减面回退、桩位、点到面口径、孤立顶点、批量归因） |
 | `tests/test_optimizations.py` | 7 | 性能优化回归（支撑密度向量化等价、镂空统计量、单次体素化流水线、预览解析复用、缓存清理、装配 AABB 预筛、布尔失败降级） |
+| `tests/test_rounds_62_162.py` | 31 | 第 63–164 轮端到端回归（下载头、批量 ZIP、队列、历史清理、打印记录、修复计划、预检、项目包、检测趋势、CSV 注入、可打印性、资源缓存、快捷键） |
+| `tests/test_rounds_62_78.py` | 35 | 第 62–81 轮回归（报告过期与重测、截断 STL、支撑未评估、机型材料回退、calibrate 真值、标定标签、报告未确认项、save 合并、损坏记录、中间产物回收） |
 
 `bench/round_gate.py` 是每轮迭代的入口闸门：不依赖 pytest，直接对确定性夹具断言
-几何量，失败退出码 1。当前 28/28。
+几何量，失败退出码 1。当前 39/39。
 
-**没有的东西不写在这里**：仓库不含 GitHub Actions 工作流，也不含 `tests/e2e.py` /
-`tests/ui_smoke.py` / `tests/bench.py`——历史上 README 声称过这些（223 项测试、47 项端到端、
-CI 双版本），实测都不存在，已按实际内容改正。覆盖率数字同理，需要时自行跑
-`pytest --cov=app`，不要引用旧值。
+`tests/e2e.py`（47 项，走完整 HTTP 链路）、`tests/ui_smoke.py`（真实浏览器冒烟 + 截图）、
+`tests/bench.py`（分阶段耗时与内存）是**独立脚本**，文件名不带 `test_` 前缀，不进 pytest 收集，
+需要单独运行：
+
+```bash
+.venv/Scripts/python.exe tests/e2e.py        # 47 通过 / 0 失败（实测）
+.venv/Scripts/python.exe tests/ui_smoke.py   # 需先启动服务
+```
+
+**没有的东西不写在这里**：仓库不含 GitHub Actions 工作流（历史上 README 声称过 CI 双版本）。
+覆盖率数字同理，需要时自行跑 `pytest --cov=app`，不要引用旧值。
 
 ## 已知限制
 

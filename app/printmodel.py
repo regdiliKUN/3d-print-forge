@@ -241,29 +241,34 @@ def support_analysis(mesh, threshold_deg: float = 45.0, bridge_mm: float = 2.0,
     empty = {
         "overhang_ratio": 0.0, "downward_ratio": 0.0, "bridgeable_ratio": 0.0,
         "support_contact_mm2": 0.0, "max_span_mm": 0.0, "mean_span_mm": 0.0,
-        "samples": 0, "ok": False,
+        "samples": 0, "ok": False, "reason": "",
     }
     if len(faces) == 0 or len(verts) == 0:
+        empty["reason"] = "模型没有三角面"
         return empty
 
     normals = analysis.face_normals(verts, faces)
     areas = analysis.tri_areas(verts, faces)
     total_area = float(areas.sum())
     if total_area <= 0:
+        empty["reason"] = "三角面面积全为零"
         return empty
 
     # 法线朝下超过阈值的面：n_z < -cos(阈值)
     limit = -math.cos(math.radians(threshold_deg))
     down_idx = np.flatnonzero(normals[:, 2] < limit)
     if len(down_idx) == 0:
+        # 确实没有朝下的面：这是一个「测过且没问题」的结论，不是「没测」
         empty["ok"] = True
+        empty["reason"] = "没有朝下超过阈值的面"
         return empty
 
     rng = np.random.default_rng(seed)
     n = int(max(200, min(sample_n, 8000)))
     pts, _pick = _sample_points_on_faces(verts, faces, down_idx, areas[down_idx], n, rng)
     if len(pts) == 0:
-        empty["ok"] = True
+        # 面在但采样点一个都没落上，说明采样环节出了问题，不能当成「没悬垂」
+        empty["reason"] = "悬垂面采样失败（0 个有效采样点）"
         return empty
 
     zmin = float(verts[:, 2].min())
@@ -275,7 +280,10 @@ def support_analysis(mesh, threshold_deg: float = 45.0, bridge_mm: float = 2.0,
     zs, geoms = sections if sections is not None else cross_section_polygons(
         mesh, samples=samples)
     if not zs:
-        empty["ok"] = True
+        # 截面切不出来（面数超限/几何破损）时，遮挡判定整条失效。
+        # 旧代码在这里给 ok=True，于是上层把所有点都当「下方有材料」，
+        # 结论变成「悬垂 0%、自支撑良好」——没测出来被当成了没问题。
+        empty["reason"] = "截面切片失败，无法判定悬空（面数过多或几何破损）"
         return empty
     zones: list = []
     for g in geoms:
@@ -341,4 +349,5 @@ def support_analysis(mesh, threshold_deg: float = 45.0, bridge_mm: float = 2.0,
         "mean_span_mm": round(float(span[~supported].mean()) if (~supported).any() else 0.0, 2),
         "samples": int(len(pts)),
         "ok": True,
+        "reason": "",
     }

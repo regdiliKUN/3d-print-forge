@@ -61,7 +61,7 @@ def test_resize_requires_target(box_proj):
         assert c.post(f"/api/projects/{box_proj['id']}/resize",
                       json={"lock_ratio": True}).status_code == 400
         assert c.post(f"/api/projects/{box_proj['id']}/resize",
-                      json={"width": 0}).status_code == 400
+                      json={"width": 0}).status_code == 422
 
 
 def test_resize_lands_on_platform(box_proj):

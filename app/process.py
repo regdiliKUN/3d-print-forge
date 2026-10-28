@@ -188,6 +188,19 @@ def drill_holes(mesh, count: int, diameter: float, wall: float, points: list | N
     if points:
         xy = np.asarray([[p[0], p[1]] for p in points], dtype=np.float64)
     else:
+        # 整块板比孔径还薄时，任何「过滤后回退」都只会打出豁口。
+        # 先做一次整体厚度闸门：只在模型最薄方向确实小于孔径 1/4 时拒绝，
+        # 镂空薄壳的包围盒仍然很大，不会被误伤。
+        try:
+            thin_dim = float(np.min(mesh.extents))
+        except Exception:
+            thin_dim = 0.0
+        hard_min = max(0.6, float(diameter) * 0.25)
+        if thin_dim and thin_dim < hard_min:
+            raise ValueError(
+                f"模型最薄方向只有 {thin_dim:.2f}mm，小于孔径 {diameter:g}mm 的安全下限；"
+                "请加厚模型或减小孔径后再打排液孔"
+            )
         xy = _bottom_sample_points(mesh, count * 3)
         # 孔必须打在够厚的地方：薄壁上一打就穿到侧面，孔变成豁口。
         # 注意这里不能用「名义壁厚」卡：体素法的实际壳厚受 pitch 限制，
@@ -261,8 +274,12 @@ def build_supports(
         tri_idx = idx
         areas = analysis.tri_areas(v, f)[tri_idx]
         total_area = float(areas.sum())
-        want = int(total_area / max(0.25, float(spacing) ** 2))
-        want = max(1, min(want, max_count))
+        # 目标点数按「面积 / 间距²」算；随机撒点后还要按最小间距去重，
+        # 去重会吃掉约一半样本。旧实现直接拿目标数撒点，4mm 间距最终只剩
+        # 2.8mm 的稀疏支撑网。先过采样再裁回目标数，密度才和用户输入一致。
+        target = int(total_area / max(0.25, float(spacing) ** 2))
+        target = max(1, min(target, max_count))
+        want = min(max_count * 4, max(target + 8, int(target * 2.6)))
         rng = np.random.default_rng(5)
         probs = areas / areas.sum() if total_area > 0 else None
         pick = rng.choice(len(tri_idx), size=want, p=probs, replace=True)
@@ -292,6 +309,12 @@ def build_supports(
             if keep_mask.any():
                 anchors = anchors[keep_mask]
                 anchor_normals = anchor_normals[keep_mask]
+            # 过采样已经完成使命，裁回用户设定的密度；不裁会让 max_count=400
+            # 的模型实际长出 700 根支撑，拆支撑时间翻倍。
+            if len(anchors) > target:
+                sel = np.sort(rng.choice(len(anchors), size=target, replace=False))
+                anchors = anchors[sel]
+                anchor_normals = anchor_normals[sel]
         # 只对自动识别的点过滤「贴平台」；手动点选是用户明确要的，不能悄悄丢掉
         anchors = anchors[anchors[:, 2] > base_z + 0.5]
 
@@ -379,6 +402,9 @@ def apply_pipeline(mesh, p: dict, progress=None) -> tuple[trimesh.Trimesh, trime
     report: dict = {"decimate": None, "hollow": None, "drill": None,
                     "orient": None, "supports": None, "scale": None}
     total_volume = float(mesh.volume) if mesh.is_watertight else 0.0
+    # 镂空时壳厚可能被自动下调；排液孔过滤必须用「实际壳厚」，
+    # 否则用户设 2mm、实际只有 0.5mm，打孔仍按 2mm 判断，孔会直接打穿侧壁。
+    effective_wall = float(p.get("wall_thickness") or 2.0)
 
     def step(frac, msg):
         if progress:
@@ -417,6 +443,7 @@ def apply_pipeline(mesh, p: dict, progress=None) -> tuple[trimesh.Trimesh, trime
                 f"壳厚 {wall}mm 超过模型最薄处 {min_wall}mm 的 45%，已自动降到 {safe}mm，否则会把壁切穿"
             )
             wall = safe
+        effective_wall = wall
         # 体积预估与镂空共用同一次体素化/EDT：旧写法先 cavity_volume 再
         # hollow_shell，同一张网格跑了两遍 O(N³)，20k 面实测多花约 0.9s、+420MB。
         hollow_stats: dict = {}
@@ -439,7 +466,7 @@ def apply_pipeline(mesh, p: dict, progress=None) -> tuple[trimesh.Trimesh, trime
     if p["hollow"] and int(p["drain_holes"]) > 0:
         mesh, dinfo = drill_holes(
             mesh, int(p["drain_holes"]), float(p["hole_diameter"]),
-            float(p["wall_thickness"]), p.get("drain_hole_points") or None,
+            effective_wall, p.get("drain_hole_points") or None,
         )
         report["drill"] = dinfo
         if dinfo.get("thin_fallback"):
@@ -447,6 +474,11 @@ def apply_pipeline(mesh, p: dict, progress=None) -> tuple[trimesh.Trimesh, trime
                 f"底面 {dinfo.get('skipped_thin', 0)} 个候选位置壳厚不足，全部被拒；"
                 "已在最薄处开孔，请打印后确认孔是否打穿而不是打成豁口。"
             )
+    elif p["hollow"]:
+        report.setdefault("warnings", []).append(
+            "已镂空但没有排液孔：树脂/粉末会封在空腔里。建议至少开 2 个 3mm 排液孔，"
+            "并让孔位于成型后的最低处。"
+        )
 
     step(0.7, "生成支撑")
     sup = None
@@ -485,6 +517,142 @@ def apply_pipeline(mesh, p: dict, progress=None) -> tuple[trimesh.Trimesh, trime
                 f"支撑直径随整体缩放同比放大：设定 {p['support_diameter']}mm → 实际 {eff}mm"
             )
     return mesh, sup, report
+
+
+def preview_pipeline(mesh, params: dict, build: list[float] | None = None) -> dict:
+    """轻量预检：只做摆正与缩放，估算尺寸/体积/用量，不跑减面、镂空和支撑。
+
+    完整处理会体素镂空、生成支撑，动辄数秒到数十秒；用户在改参数时需要的
+    是「会不会超出成型空间、大概用多少料」，不是立刻产出 STL。这里用同一套
+    摆正和缩放逻辑，保证预检尺寸与正式处理一致，其余字段明确标注为估算。
+    """
+    p = dict(DEFAULTS)
+    # 注意：入参曾用 p 命名又立刻被 DEFAULTS 覆盖，导致预检永远按默认参数算——
+    # 用户把目标高度改成 80mm，预检仍显示 20mm、还提示「可打印」。
+    p.update({k: v for k, v in (params or {}).items() if k in DEFAULTS})
+
+    m = mesh.copy()
+    warnings: list[str] = []
+    errors: list[str] = []
+    orientation = None
+    if p["orient"]:
+        m, orientation = auto_orient(m, float(p["overhang_deg"]))
+
+    pre_extents = [float(x) for x in m.extents]
+    factor = float(p["scale"])
+    target = "scale"
+    if float(p.get("target_height") or 0) > 0:
+        target = "height"
+        cur = float(m.extents[2])
+        if cur > 1e-9:
+            factor = float(p["target_height"]) / cur
+    elif float(p.get("target_max_dim") or 0) > 0:
+        target = "max_dim"
+        cur = float(max(m.extents))
+        if cur > 1e-9:
+            factor = float(p["target_max_dim"]) / cur
+    if abs(factor - 1.0) > 1e-12:
+        m.apply_scale(factor)
+
+    stats = meshio.mesh_stats(m)
+    volume = max(0.0, float(stats.get("volume_mm3") or 0.0))
+    area = max(0.0, float(stats.get("area_mm2") or 0.0))
+    extents = [float(x) for x in (stats.get("extents") or [0, 0, 0])]
+
+    shell_volume = None
+    saved_volume = None
+    if p["hollow"]:
+        if not stats.get("is_watertight"):
+            errors.append("模型不水密，无法镂空；请先补洞并统一法线")
+        else:
+            wall = float(p["wall_thickness"])
+            # 薄壁模型按表面积×壁厚会高估，封顶到实体体积；这是估算，不是切片结果。
+            shell_volume = min(volume, area * wall)
+            saved_volume = max(0.0, volume - shell_volume)
+            if wall > 0 and area > 0 and volume / area * 2 < wall:
+                warnings.append(
+                    f"壳厚 {wall:g}mm 接近或超过平均壁厚，正式处理会自动降壳厚，预检用量仅供参考"
+                )
+            if int(p["drain_holes"]) <= 0:
+                warnings.append("已镂空但没有排液孔：树脂/粉末会封在空腔里，建议至少开 2 个孔")
+    else:
+        warnings.append("未镂空：按实体估算用量；开启镂空可省料但需要排液孔")
+
+    if p["supports"] in ("auto", "manual"):
+        warnings.append("支撑体积未计入预检用量；正式处理后会额外增加支撑材料")
+    if float(p["decimate_ratio"]) < 0.999:
+        warnings.append(f"减面 ×{float(p['decimate_ratio']):g} 可能轻微改变尺寸与体积，预检按原网格计算")
+
+    fit = _fit_check(extents, build)
+    if fit and not fit["ok"]:
+        warnings.append(
+            "当前尺寸超出成型空间："
+            + "、".join(f"{o['axis']} 需 {o['need']:.1f}mm > {o['have']:.1f}mm"
+                        for o in fit["oversize"])
+        )
+    if fit and fit.get("scale_to_fit", 1.0) < 1.0:
+        fit["scale_to_fit"] = round(fit["scale_to_fit"], 4)
+        fit["scaled_extents"] = [round(x * fit["scale_to_fit"], 2) for x in extents]
+
+    return {
+        "before": {
+            "extents": [round(x, 3) for x in mesh.extents],
+            "max_dim": round(float(max(mesh.extents)), 3) if len(mesh.extents) else 0,
+            "volume_mm3": round(float(mesh.volume), 3) if mesh.is_watertight else None,
+        },
+        "orientation": orientation,
+        "pre_scale_extents": [round(x, 2) for x in pre_extents],
+        "scale": {"factor": round(factor, 4), "target": target,
+                  "extents": [round(x, 2) for x in extents]},
+        "extents": [round(x, 2) for x in extents],
+        "volume_mm3": round(volume, 1),
+        "volume_cm3": round(volume / 1000.0, 2),
+        "area_mm2": round(area, 1),
+        "estimated_shell_volume_mm3": round(shell_volume, 1) if shell_volume is not None else None,
+        "estimated_saved_volume_mm3": round(saved_volume, 1) if saved_volume is not None else None,
+        "estimated_saved_pct": round(saved_volume / max(1e-9, volume) * 100, 1)
+                                if saved_volume is not None else None,
+        "fit": fit,
+        "warnings": warnings,
+        "errors": errors,
+        "approximate": True,
+    }
+
+
+def _fit_check(extents: list[float], build: list[float] | None) -> dict | None:
+    """按可旋转的姿态检查成型空间；0.5mm 是取件/夹具余量。"""
+    if not build or len(build) != 3:
+        return None
+    try:
+        build = [float(x) for x in build]
+    except (TypeError, ValueError):
+        return None
+    if any(x <= 0 for x in build):
+        return None
+    margin = 0.5
+    ext = [float(x) for x in extents]
+    dims = sorted(ext, reverse=True)
+    beds = sorted(build, reverse=True)
+    over = []
+    for i, (need, have) in enumerate(zip(dims, beds)):
+        available = have - margin * 2
+        if need > available + 1e-6:
+            label = ("最长边", "次长边", "最短边")[i] if i < 3 else f"第 {i + 1} 边"
+            over.append({"axis": label, "need": round(need, 2),
+                         "have": round(have, 2), "over": round(need - available, 2)})
+    scale_to_fit = 1.0
+    if ext and any(x > 0 for x in ext):
+        ratios = [(b - margin * 2) / x for b, x in zip(beds, dims) if x > 1e-9 and b > margin * 2]
+        if ratios:
+            scale_to_fit = min(1.0, min(ratios))
+    return {
+        "ok": not over,
+        "build": [round(x, 2) for x in build],
+        "extents": [round(x, 2) for x in ext],
+        "margin_mm": margin,
+        "oversize": over,
+        "scale_to_fit": scale_to_fit,
+    }
 
 
 # ---------------------------------------------------------------- 任务

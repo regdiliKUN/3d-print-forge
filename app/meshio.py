@@ -30,19 +30,103 @@ _STL_DTYPE = np.dtype([("n", "<f4", (3,)), ("v", "<f4", (3, 3)), ("attr", "<u2")
 
 
 # ---------------------------------------------------------------- 格式嗅探
-def is_binary_stl(path: Path) -> bool:
-    size = path.stat().st_size
+def probe_stl(path: Path) -> dict:
+    """不解析几何，只看文件头与长度，判断 STL 是否完整。
+
+    为什么需要这个：`is_binary_stl` 用「84 + n×50 == 文件长度」判二进制，
+    文件被截断时这个等式不成立，于是掉进 ASCII 分支；ASCII 正则一个顶点都匹配不到，
+    最后**安静地返回 0 个三角面**。用户看到的是「模型没有任何三角面」，
+    完全联想不到「文件只拷了一半」——实测把 12 面的立方体截掉一半，
+    上传、检测、建议全流程都不报错。
+    """
+    info = {"format": "unknown", "declared_faces": 0, "size": 0,
+            "expected_size": 0, "truncated": False, "missing_bytes": 0,
+            "trailing_bytes": 0, "endsolid": None}
+    try:
+        size = path.stat().st_size
+    except OSError as e:
+        info["error"] = str(e)[:120]
+        return info
+    info["size"] = size
     if size < 84:
-        return False
+        info["format"] = "ascii" if size else "empty"
+        info["truncated"] = size > 0
+        return info
+
     with path.open("rb") as f:
         head = f.read(84)
     n = struct.unpack("<I", head[80:84])[0]
-    if 84 + n * 50 == size:
-        return True
-    if head[:5].lower() == b"solid":
-        # 有些二进制 STL 也以 solid 开头，靠尺寸判定
-        return 84 + n * 50 == size
-    return False
+    expected = 84 + n * 50
+    info["declared_faces"] = int(n)
+    info["expected_size"] = int(expected)
+    looks_ascii = head[:5].lower() == b"solid"
+
+    if size == expected and n > 0:
+        info["format"] = "binary"
+        return info
+    if size > expected and not looks_ascii:
+        info["format"] = "binary"
+        info["trailing_bytes"] = int(size - expected)
+        return info
+    if looks_ascii:
+        info["format"] = "ascii"
+        # ASCII 的完整性线索：结尾通常有 endsolid。但不少导出器不写，
+        # 所以这只能当「可疑」信号，不能据此拒收文件。
+        try:
+            with path.open("rb") as f:
+                f.seek(max(0, size - 512))
+                tail = f.read().lower()
+            info["endsolid"] = b"endsolid" in tail
+            info["truncated_suspect"] = not info["endsolid"]
+        except OSError:
+            pass
+        return info
+    if n > 0 and size < expected:
+        info["format"] = "binary"
+        info["truncated"] = True
+        info["missing_bytes"] = int(expected - size)
+        info["actual_faces"] = int((size - 84) // 50)
+        return info
+    info["format"] = "ascii" if size else "empty"
+    return info
+
+
+def is_binary_stl(path: Path) -> bool:
+    """靠头部计数 + 文件长度判定，允许尾部有多余字节。
+
+    旧实现要求「84 + n×50 == 文件长度」严格相等：文件尾部多出几个字节
+    （某些导出器会附加元数据）就判不成二进制，于是掉进 ASCII 分支、解析出 0 个面。
+    实测给正常立方体尾部加 20 字节，加载结果就是 0 面。
+    """
+    info = probe_stl(path)
+    return info.get("format") == "binary" and not info.get("truncated")
+
+
+def human_size(n: int | float) -> str:
+    """字节数转人话。小文件按 KB/字节显示——12 面的立方体只有 684 字节，
+    写成「应为 0.00MB，实际只有 0.00MB」等于没说。"""
+    v = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(v) < 1024 or unit == "GB":
+            return f"{v:.0f}{unit}" if unit == "B" else f"{v:.2f}{unit}"
+        v /= 1024.0
+    return f"{v:.2f}GB"
+
+
+def _assert_stl_complete(path: Path) -> None:
+    """截断的二进制 STL 直接拒绝，而不是当成空模型往下走。
+
+    ASCII 缺 endsolid 只当可疑（不少导出器不写），不拒收。
+    """
+    info = probe_stl(path)
+    if not info.get("truncated") or info.get("format") != "binary":
+        return
+    raise ValueError(
+        f"STL 文件被截断：文件头声明 {info['declared_faces']:,} 个三角面，"
+        f"应为 {human_size(info['expected_size'])}，实际只有 {human_size(info['size'])}"
+        f"（缺 {info['missing_bytes']:,} 字节，仅够 {info.get('actual_faces', 0):,} 个完整三角面）。"
+        f"请重新导出或重新拷贝文件。"
+    )
 
 
 def _stl_face_count(path: Path) -> int:
@@ -59,9 +143,11 @@ def load_vertices_faces(
 ) -> tuple[np.ndarray, np.ndarray]:
     """返回 (vertices float32 Nx3, faces uint32 Mx3)，已做顶点去重。"""
     path = Path(path)
-    if path.suffix.lower() == ".stl" and is_binary_stl(path):
-        return _load_binary_stl(path, chunk_faces or config.get().runtime.chunk_faces, progress)
     if path.suffix.lower() == ".stl":
+        # 截断/半截文件在解析层就会被吞成 0 面，这里先挡一道
+        _assert_stl_complete(path)
+        if is_binary_stl(path):
+            return _load_binary_stl(path, chunk_faces or config.get().runtime.chunk_faces, progress)
         return _load_ascii_stl(path, progress)
     return _load_via_trimesh(path)
 

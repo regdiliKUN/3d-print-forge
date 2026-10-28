@@ -30,5 +30,11 @@ Thumbs.db
 
 # 测试与覆盖率
 .pytest_cache/
+.pytest_tmp/
+.ptmp_*/
 .coverage
 htmlcov/
+
+# 本地打包产物（体积大，发布走 Release，不进源码仓库）
+/3D打印建模工具.exe
+

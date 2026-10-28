@@ -168,7 +168,10 @@ def estimate(process: str, printer: str, material: str, key: str) -> dict:
     sd = math.sqrt(sd * sd + (1.0 - w) * DEFAULT_LOG_SD * DEFAULT_LOG_SD)
     sd = max(sd, MIN_LOG_SD)
 
-    src = "group" if n_g >= 3 else ("global" if n_g else "prior")
+    # 标签必须跟算法一致：这里**只用本组样本**，没有做任何跨机型池化。
+    # 旧代码在 1~2 条记录时标成 "global"，上层据此在界面上写「本机历史修正」，
+    # 实际上只是一条记录被 1/(1+8) 权重缩过——名字对不上做的事。
+    src = "group" if n_g >= 3 else ("sparse" if n_g else "prior")
     gsuccess = [r for r in recs
                 if r.get("process") == process and r.get("printer") == printer
                 and r.get("material") == material and r.get("result")]

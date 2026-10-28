@@ -77,7 +77,7 @@ def test_rotate_rejects_bad_axis(live):
 
     with TestClient(app) as c:
         r = c.post(f"/api/projects/{live['id']}/rotate", json={"axis": "w", "degrees": 90})
-        assert r.status_code == 400
+        assert r.status_code == 422
 
 
 def test_rotate_lands_on_platform(live):

@@ -42,7 +42,7 @@ def test_component_field_single_part():
     ((254, 100, 100), "mm?"),        # 10 英寸
     ((203.2, 100, 100), "mm?"),      # 8 英寸
     ((150, 100, 80), "mm"),
-    ((0.25, 0.2, 0.2), "m"),
+    ((0.25, 0.2, 0.2), "m?"),
 ])
 def test_infer_units_inch_hint(ext, expect):
     assert analysis.infer_units(ext)["unit"] == expect

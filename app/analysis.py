@@ -1244,7 +1244,10 @@ def quality_score(report: dict) -> dict:
     # 打印一个根本不存在的件。这属于「给出错误的安全结论」，比直接报错危险得多，
     # 所以必须在打分之前单独拦下来。
     n_faces = int((report.get("stats") or {}).get("faces") or 0)
-    if n_faces == 0:
+    # 只有调用方明确给了 stats 且面数为 0 才判空；旧版 quality_score 的调用方
+    # 只传 items。把「没有 stats」当成 0 面会把健康网格误判成 D 级。
+    has_stats = isinstance(report.get("stats"), dict) and report.get("stats") != {}
+    if (has_stats and n_faces == 0) or not report.get("items"):
         return {
             "score": 0.0, "grade": "D", "verdict": "模型没有任何三角面，无法打印",
             "parts": [{"name": "几何存在性", "score": 0.0, "max": 100,
@@ -1492,6 +1495,24 @@ def run_job(ctx, params):
         "failed_checks": [i.get("id") for i in final_items if (i.get("value") or {}).get("error")],
     }
     store.update(pid, analysis=report)
+    # 健康趋势：只存轻量摘要，不复制整份报告（七项检测的正文可能有几十 KB）。
+    # 同一文件重复检测时更新时间戳但不重复占位，界面据此画分数走势。
+    prev = list(proj.get("analysis_history") or [])
+    entry = {
+        "at": report["at"],
+        "score": report["quality"]["score"],
+        "grade": report["quality"]["grade"],
+        "counts": summary["counts"],
+        "total": summary["total"],
+        "faces": stats["faces"],
+        "file": report["file"],
+        "mtime_ns": mtime,
+    }
+    if prev and prev[-1].get("mtime_ns") == mtime and prev[-1].get("score") == entry["score"]:
+        prev[-1] = entry
+    else:
+        prev.append(entry)
+    store.update(pid, analysis_history=prev[-12:])
     ctx.tick(1.0, "检测完成", "done")
     return {"report": report}
 

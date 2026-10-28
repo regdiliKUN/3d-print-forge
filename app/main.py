@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import logging
+import os
 import re
 import time as _time
 import uuid
@@ -58,6 +60,23 @@ async def version_rewrite(request, call_next):
     if path.startswith("/api/v1/"):
         request.scope["path"] = "/api/" + path[len("/api/v1/"):]
     return await call_next(request)
+
+
+@app.middleware("http")
+async def cache_headers_middleware(request, call_next):
+    """让界面资源每次升级后都能立刻生效。
+
+    StaticFiles 默认只给 ETag/Last-Modified，浏览器会按启发式规则缓存一段时间；
+    结果就是后端已经更新、页面还在跑旧 app.js（深链、新按钮全部失效）。
+    这里显式要求 HTML/静态资源回源校验（304 仍然很便宜），API 则完全不缓存。
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    elif path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.middleware("http")
@@ -250,6 +269,23 @@ def _checked_params(payload: dict, keys) -> dict:
     return out
 
 
+def _checked_bool(payload: dict, key: str, default: bool = False) -> bool:
+    """严格解析布尔参数：字符串 "false" 不能被 bool("false") 当成 True。"""
+    if key not in payload or payload[key] is None:
+        return default
+    raw = payload[key]
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    text = str(raw).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off", ""):
+        return False
+    raise HTTPException(422, f"{key} 必须是布尔值，收到 {raw!r}")
+
+
 def _spawn(kind: str, title: str, params: dict, worker, pid: str | None) -> dict:
     job = jobs.submit(kind, title, params, worker, pid)
     return _job_out(job)
@@ -389,37 +425,149 @@ def recent_logs(lines: int = Query(120, ge=1, le=2000)) -> dict:
 
 # ---------------------------------------------------------------- 项目
 SAFE = re.compile(r"[^\w\-.]+")
+# 允许导入的网格格式；.stl/.obj/.ply/.3mf 是主流程，off/glb/gltf 由 trimesh 兜底。
+ALLOWED_MODEL_EXT = {".stl", ".obj", ".ply", ".3mf", ".off", ".glb", ".gltf"}
+MAX_UPLOAD_MB = max(1, int(os.environ.get("TPF_MAX_UPLOAD_MB", "512")))
+
+
+def _clean_filename(raw: str | None, fallback: str = "model.stl") -> str:
+    """只取文件名本身，兼容浏览器可能传来的 Windows/POSIX 混合路径。"""
+    name = str(raw or "").strip()
+    name = re.split(r"[\\/]", name)[-1]
+    name = "".join(ch for ch in name if ch >= " " and ch != "\x7f").strip()
+    if name in ("", ".", ".."):
+        name = fallback
+    return name[:160]
+
+
+def _display_stem(name: str | None) -> str:
+    """下载文件名用的主名。显示名里可能带 /，Path().stem 会把前半段吃掉。"""
+    base = re.split(r"[\\/]", str(name or "model"))[-1]
+    stem = Path(base).stem.strip() or "model"
+    return SAFE.sub("_", stem)[:80] or "model"
+
+
+def _download_headers(filename: str, disposition: str = "attachment") -> dict:
+    """同时给 ASCII 回退名和 RFC 5987 UTF-8 名，中文名不再变问号。
+
+    头里不能出现 CR/LF（响应拆分）或裸引号（截断 filename），这里统一清掉；
+    UTF-8 名走 filename*，由浏览器按 RFC 5987 解码。
+    """
+    from urllib.parse import quote
+
+    safe = str(filename or "download").replace("\r", "").replace("\n", "")
+    ascii_name = safe.encode("ascii", "ignore").decode().replace('"', "_").replace("\\", "_")
+    ascii_name = ascii_name.strip() or "download"
+    return {
+        "Content-Disposition": (
+            f"{disposition}; filename=\"{ascii_name}\"; "
+            f"filename*=UTF-8''{quote(safe, safe='')}"
+        )
+    }
 
 
 @app.post("/api/upload")
-async def upload(files: list[UploadFile] = File(...)) -> dict:
-    created = []
+async def upload(
+    files: list[UploadFile] = File(...),
+    dedupe: bool = Query(False, description="按内容哈希跳过重复导入"),
+) -> dict:
+    """流式接收多个模型。
+
+    旧实现边读边写、不校验扩展名/大小：一个 .exe 或 10GB 文件会被当成项目，
+    中途失败还会留下半个文件。现在逐文件校验、写 .part 临时文件、失败即清理，
+    并且把每个文件的错误单独返回，不因为第 3 个文件坏了就让前 2 个白传。
+    """
+    created: list[dict] = []
+    errors: list[dict] = []
+    duplicates: list[dict] = []
+    limit = MAX_UPLOAD_MB * 1024 * 1024
+
     for f in files:
-        raw = Path(f.filename or "model.stl").name
-        safe = SAFE.sub("_", raw)
+        raw_name = _clean_filename(f.filename)
+        suffix = Path(raw_name).suffix.lower()
+        if suffix not in ALLOWED_MODEL_EXT:
+            errors.append({"name": raw_name, "error": f"不支持的格式 {suffix or '（无扩展名）'}"})
+            continue
+        safe = SAFE.sub("_", raw_name)
         dest = config.UPLOADS / f"{uuid.uuid4().hex[:8]}_{safe}"
+        tmp = dest.with_suffix(dest.suffix + ".part")
         size = 0
-        with dest.open("wb") as out:
-            while True:
-                chunk = await f.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                out.write(chunk)
+        digest = hashlib.sha256()
+        try:
+            with tmp.open("wb") as out:
+                while True:
+                    chunk = await f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > limit:
+                        raise ValueError(f"文件超过 {MAX_UPLOAD_MB}MB 上限")
+                    digest.update(chunk)
+                    out.write(chunk)
+            if size == 0:
+                raise ValueError("文件为空")
+            os.replace(tmp, dest)
+            # 结构完整性校验：截断的 STL 解析出来是 0 面，会在「检测」那一步
+            # 变成「模型没有任何三角面」，用户根本想不到是文件没拷全。
+            # 这里当场拒绝并说清楚缺多少字节。
+            if suffix == ".stl":
+                from . import meshio as _meshio
+
+                info = _meshio.probe_stl(dest)
+                if info.get("truncated") and info.get("format") == "binary":
+                    raise ValueError(
+                        f"STL 被截断：文件头声明 {info['declared_faces']:,} 个三角面，"
+                        f"实际只有 {info['size'] / 1048576:.2f}MB / 应为 "
+                        f"{info['expected_size'] / 1048576:.2f}MB"
+                        f"（缺 {info['missing_bytes']:,} 字节）"
+                    )
+        except Exception as e:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                # 校验失败时 dest 已经落地，必须一起删掉，否则留下一个进不了库的孤儿文件
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+            errors.append({"name": raw_name, "error": str(e)})
+            continue
+
+        sha = digest.hexdigest()
+        if dedupe:
+            existing = store.find_by_hash(sha)
+            if existing:
+                try:
+                    dest.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                duplicates.append({"name": raw_name, "project": existing})
+                continue
         proj = store.create(safe, dest)
-        proj["stats"] = {"size_bytes": size}
+        proj["stats"] = {"size_bytes": size, "sha256": sha}
         store.save(proj)
         created.append(proj)
-    return {"projects": created}
+    return {"projects": created, "errors": errors, "duplicates": duplicates,
+            "max_upload_mb": MAX_UPLOAD_MB}
 
 
 @app.post("/api/demo")
-def create_demo_model() -> dict:
+def create_demo_model(force: bool = Query(False)) -> dict:
     """生成一个带典型缺陷的示例模型，新用户点一下就能走完整流程。
 
     故意做进四类问题：破洞、薄壁、碎屑、法线反转——
     这样检测报告、一键修复、热力图这些功能都有东西可看。
+    默认复用已存在的示例项目：旧实现每点一次就多一个 64KB 文件和一个列表项，
+    第一次打开界面就出现四五个同名「示例模型」。
     """
+    if not force:
+        for item in store.list_all():
+            if "示例" in (item.get("tags") or []) and "示例模型" in (item.get("name") or ""):
+                p = store.get(item["id"])
+                if p and Path(p.get("current") or p.get("source") or "").exists():
+                    return p
+
     import numpy as np
     import trimesh
 
@@ -489,13 +637,13 @@ def bundle_project(pid: str) -> Response:
     return Response(
         buf.getvalue(),
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{Path(p["name"]).stem}.zip"'},
+        headers=_download_headers(f"{_display_stem(p['name'])}.zip"),
     )
 
 
 @app.post("/api/projects/import-bundle")
 async def import_bundle(file: UploadFile = File(...)) -> dict:
-    """导入项目包。防 zip slip：成员路径不允许绝对路径或 .."""
+    """导入项目包。防 zip slip、zip 炸弹，并恢复可用的历史版本。"""
     import zipfile
     import io as _io
 
@@ -507,11 +655,20 @@ async def import_bundle(file: UploadFile = File(...)) -> dict:
     except Exception as e:
         raise HTTPException(400, f"不是有效的 zip：{e}") from e
 
+    infos = z.infolist()
+    if len(infos) > 500:
+        raise HTTPException(400, f"包内文件过多（{len(infos)} 个，上限 500）")
+    total = sum(max(0, int(i.file_size)) for i in infos)
+    if total > 800 * 1024 * 1024:
+        raise HTTPException(400, f"解压后总大小 {total / 1024 / 1024:.0f}MB 超过 800MB 上限")
+    if any(int(i.file_size) > 120 * 1024 * 1024 for i in infos):
+        raise HTTPException(400, "包内单个文件超过 120MB 上限")
+
     names = z.namelist()
     if "project.json" not in names:
         raise HTTPException(400, "包里缺少 project.json，不是本项目导出的包")
     for n in names:
-        if n.startswith("/") or ".." in Path(n).parts or ":" in n:
+        if n.startswith("/") or "\\" in n or ".." in Path(n).parts or ":" in n:
             raise HTTPException(400, f"包内有非法路径：{n}")
 
     try:
@@ -522,18 +679,53 @@ async def import_bundle(file: UploadFile = File(...)) -> dict:
     model_name = next((n for n in names if n.startswith("model.")), None)
     if not model_name:
         raise HTTPException(400, "包里缺少模型文件")
+    suffix = Path(model_name).suffix.lower()
+    if suffix not in ALLOWED_MODEL_EXT:
+        raise HTTPException(400, f"包内模型格式 {suffix or '无扩展名'} 不受支持")
 
     safe_stem = re.sub(r"[^\w\u4e00-\u9fa5.-]+", "_", Path(str(meta.get("name") or "imported")).stem)[:60]
-    dest = config.UPLOADS / f"{uuid.uuid4().hex[:8]}_{safe_stem}{Path(model_name).suffix}"
+    prefix = uuid.uuid4().hex[:8]
+    dest = config.UPLOADS / f"{prefix}_{safe_stem}{suffix}"
     dest.write_bytes(z.read(model_name))
 
-    proj = store.create(f"{safe_stem}{Path(model_name).suffix}", dest)
+    # 恢复历史：旧版只解包模型，history.json 里的绝对路径在新机器上全部失效。
+    # 现在把 history/000.ext 一并解到 uploads，并把 out 重写成新机器上的绝对路径。
+    hist_in = []
+    try:
+        if "history.json" in names:
+            hist_in = json.loads(z.read("history.json").decode("utf-8"))
+    except Exception:
+        hist_in = []
+    hist_out = []
+    if isinstance(hist_in, list):
+        for i, h in enumerate(hist_in[:200]):
+            if not isinstance(h, dict):
+                continue
+            member = next((n for n in names
+                           if n.startswith(f"history/{i:03d}.") and n.count("/") == 1), None)
+            if not member:
+                continue
+            mem_suffix = Path(member).suffix.lower()
+            if mem_suffix not in ALLOWED_MODEL_EXT:
+                continue
+            out = config.UPLOADS / f"{prefix}_hist_{i:03d}{mem_suffix}"
+            out.write_bytes(z.read(member))
+            hist_out.append({
+                "at": h.get("at"), "action": h.get("action") or "import",
+                "params": h.get("params") or {}, "out": str(out),
+                "note": str(h.get("note") or "")[:200],
+            })
+
+    proj = store.create(f"{safe_stem}{suffix}", dest)
     store.update(proj["id"], tags=list(meta.get("tags") or []),
                  favorite=bool(meta.get("favorite")),
-                 analysis=meta.get("analysis"), advice=meta.get("advice"))
+                 analysis=meta.get("analysis"), advice=meta.get("advice"),
+                 history=hist_out)
     return {"ok": True, "id": proj["id"], "name": proj["name"],
-            "history": len(meta.get("history") or []),
-            "note": "历史文件已解包，但只保留模型本体，回滚记录需在原机器上使用"}
+            "history": len(hist_out),
+            "restored": bool(hist_out),
+            "note": (f"已恢复 {len(hist_out)} 个历史版本，可在历史里回滚。"
+                     if hist_out else "包内没有可恢复的历史文件，只导入了模型本体。")}
 
 
 @app.post("/api/projects/{pid}/print-record")
@@ -542,13 +734,37 @@ def add_print_record(pid: str, payload: dict = Body(default={})) -> dict:
     p = store.get(pid)
     if not p:
         raise HTTPException(404, "项目不存在")
-    result = str(payload.get("result") or "success").lower()
+    result = str(payload.get("result") or "success").lower().strip()
+    if result in ("ok", "pass", "成功"):
+        result = "success"
+    if result in ("failed", "error", "失败"):
+        result = "fail"
     if result not in ("success", "fail"):
         raise HTTPException(400, "result 只能是 success 或 fail")
+
+    def _text(key: str, limit: int) -> str:
+        raw = str(payload.get(key) or "")
+        return "".join(ch for ch in raw if ch >= " " and ch != "\x7f").strip()[:limit]
+
+    duration = payload.get("duration_min")
+    if duration not in (None, ""):
+        try:
+            duration = float(duration)
+        except (TypeError, ValueError):
+            raise HTTPException(422, "duration_min 必须是数字（分钟）")
+        if not (0 <= duration <= 100000):
+            raise HTTPException(422, "duration_min 必须在 0 ~ 100000 分钟之间")
+        duration = round(duration, 1)
+    else:
+        duration = None
+
     rec = {
         "at": datetime.now().isoformat(timespec="seconds"),
         "result": result,
-        "note": str(payload.get("note") or "")[:200],
+        "note": _text("note", 200),
+        "duration_min": duration,
+        "material": _text("material", 40),
+        "printer": _text("printer", 60),
         "faces": ((p.get("analysis") or {}).get("stats") or {}).get("faces"),
     }
     hist = list(p.get("prints") or [])
@@ -556,8 +772,10 @@ def add_print_record(pid: str, payload: dict = Body(default={})) -> dict:
     hist = hist[-30:]
     store.update(pid, prints=hist)
     ok = sum(1 for x in hist if x["result"] == "success")
+    total_min = sum(float(x.get("duration_min") or 0) for x in hist)
     return {"ok": True, "prints": hist, "success": ok, "total": len(hist),
-            "rate": round(ok / len(hist) * 100, 1)}
+            "rate": round(ok / len(hist) * 100, 1),
+            "total_minutes": round(total_min, 1)}
 
 
 @app.get("/api/projects/{pid}/print-record")
@@ -566,9 +784,11 @@ def get_print_records(pid: str) -> dict:
     if not p:
         raise HTTPException(404, "项目不存在")
     hist = list(p.get("prints") or [])
-    ok = sum(1 for x in hist if x["result"] == "success")
+    ok = sum(1 for x in hist if x.get("result") == "success")
+    total_min = sum(float(x.get("duration_min") or 0) for x in hist)
     return {"prints": hist, "success": ok, "total": len(hist),
-            "rate": round(ok / len(hist) * 100, 1) if hist else 0.0}
+            "rate": round(ok / len(hist) * 100, 1) if hist else 0.0,
+            "total_minutes": round(total_min, 1)}
 
 
 @app.post("/api/projects/{pid}/duplicate")
@@ -732,9 +952,107 @@ def analyze(pid: str, payload: dict = Body(default={})) -> dict:
     p = store.get(pid)
     if not p:
         raise HTTPException(404, "项目不存在")
+    payload = payload or {}
     params = {"sample_faces": 1500, "check_self_intersection": True}
-    params.update(_checked_params(payload or {}, ("sample_faces",)))
+    params.update(_checked_params(payload, ("sample_faces",)))
+    # 以前这里只透传 sample_faces：前端把「检测自相交」关掉后，
+    # 后端仍然跑完整 AABB 自交测试，大模型照样卡几分钟。布尔参数必须单独解析。
+    if "check_self_intersection" in payload:
+        params["check_self_intersection"] = _checked_bool(
+            payload, "check_self_intersection", True
+        )
     return _spawn("analyze", f"检测 {p['name']}", params, analysis.run_job, pid)
+
+
+@app.get("/api/projects/{pid}/repair-plan")
+def repair_plan(pid: str) -> dict:
+    """根据最近一次检测报告推荐修复动作，并解释「为什么要修」。
+
+    旧版「一键推荐」永远只选合并顶点/补洞/统一法线：自交、碎屑、单位错误
+    即使检测报告已经点名，用户还得自己猜该勾哪一项。这里把报告翻译成计划。
+    """
+    from . import repair as repair_mod
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    report = p.get("analysis") or {}
+    items = {str(i.get("id")): (i.get("value") or {}) for i in (report.get("items") or [])}
+    actions: list[str] = []
+    reasons: dict[str, str] = {}
+    warnings: list[str] = []
+
+    def add(action: str, reason: str) -> None:
+        if action not in actions:
+            actions.append(action)
+            reasons[action] = reason
+
+    wt = items.get("watertight") or {}
+    boundary = int(wt.get("boundary_edges") or 0)
+    nonman = int(wt.get("nonmanifold_edges") or 0)
+    dup = int(wt.get("duplicate_faces") or 0)
+    if dup or nonman:
+        add("merge_vertices", f"重复面 {dup}、非流形边 {nonman}，先合并重复顶点")
+    if boundary:
+        add("fill_holes", f"有 {boundary} 条开放边，需要补洞才能变成闭合实体")
+
+    nm = items.get("normals") or {}
+    inv = int(nm.get("inverted_components") or 0)
+    wind = int(nm.get("winding_conflicts") or 0)
+    if inv or wind:
+        add("fix_normals", f"朝内组件 {inv}、绕序冲突 {wind}，切片软件会误判内外")
+
+    si = items.get("self_intersection") or {}
+    si_count = int(si.get("count") or si.get("pairs") or 0)
+    if si_count:
+        add("resolve_self_intersection", f"检测到 {si_count} 处自相交，布尔/切片可能失败")
+
+    comp = items.get("components") or {}
+    tiny = int(comp.get("tiny") or 0)
+    total = int(comp.get("components") or comp.get("count") or 0)
+    if tiny:
+        add(
+            "remove_small",
+            f"{total} 个连通体中有 {tiny} 个是碎屑，会被一起打出来，先删掉",
+        )
+
+    units = items.get("units") or {}
+    scale = units.get("suggested_scale") or units.get("scale")
+    try:
+        scale = float(scale) if scale is not None else 1.0
+    except (TypeError, ValueError):
+        scale = 1.0
+    unit = str(units.get("unit") or "未知单位")
+    if abs(scale - 1.0) > 0.01:
+        if units.get("ambiguous") or unit.endswith("?") or units.get("needs_confirmation"):
+            # 单位存在两种合理解释（如 0.5 可能是米也可能是毫米），自动换算
+            # 可能把模型放大 1000 倍。这里只提示，不替用户做决定。
+            warnings.append(
+                f"尺寸单位不确定（{unit}，可能是 {scale:g} 倍）：请对照实物确认后再手动勾选单位换算"
+            )
+        else:
+            add("rescale", f"单位疑似不对，建议缩放 ×{scale:g}（{unit}）")
+
+    thick = items.get("thickness") or {}
+    mn = thick.get("min")
+    try:
+        mn = float(mn) if mn is not None else None
+    except (TypeError, ValueError):
+        mn = None
+    if mn is not None and mn < 0.8 and not thick.get("degraded"):
+        add("thicken", f"最薄处 {mn:.2f}mm，低于 0.8mm 告警线")
+
+    ordered = [a for a in repair_mod.normalize_order(actions) if a in repair_mod.ACTIONS]
+    return {
+        "actions": ordered,
+        "reasons": reasons,
+        "warnings": warnings,
+        "default": [a for a in ("merge_vertices", "fill_holes", "fix_normals")],
+        "has_analysis": bool(report.get("items")),
+        "quality": report.get("quality"),
+        "scale_factor": scale if "rescale" in ordered else None,
+        "resolved": bool(report.get("items")) and not ordered and not warnings,
+    }
 
 
 @app.post("/api/projects/{pid}/repair")
@@ -763,6 +1081,61 @@ def repair(pid: str, payload: dict = Body(...)) -> dict:
     return _spawn("repair", f"修复 {p['name']}", params, repair_mod.run_job, pid)
 
 
+@app.post("/api/projects/{pid}/process-preview")
+def process_preview(pid: str, payload: dict = Body(...)) -> dict:
+    """处理前预检：摆正后的尺寸、体积、镂空省料和成型空间匹配。
+
+    不创建任务、不写输出文件，供前端在点「开始处理」前快速确认参数。
+    """
+    from . import meshio as meshio_mod
+    from . import printers as printers_mod
+    from . import process as process_mod
+
+    p = store.get(pid)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    params = dict(payload or {})
+    params.update(_checked_params(payload, (
+        "decimate_ratio", "wall_thickness", "drain_holes", "hole_diameter",
+        "support_diameter", "support_spacing", "overhang_deg", "scale",
+        "target_height", "target_max_dim",
+    )))
+    sup = _checked_enum(payload, "supports")
+    if sup is not None:
+        params["supports"] = sup
+    for key in ("hollow", "orient"):
+        if key in payload:
+            params[key] = _checked_bool(payload, key)
+    if float(params.get("target_height") or 0) > 0 and float(params.get("target_max_dim") or 0) > 0:
+        params["target_max_dim"] = 0.0
+
+    build = payload.get("build")
+    printer = None
+    if build is None and payload.get("printer_key"):
+        printer = printers_mod.get_preset(str(payload["printer_key"]))
+        if printer:
+            build = printer.get("build")
+    if build is not None:
+        if (not isinstance(build, (list, tuple)) or len(build) != 3
+                or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in build)):
+            raise HTTPException(422, "build 必须是 [x, y, z] 三个正数（mm）")
+        if any(float(x) <= 0 for x in build):
+            raise HTTPException(422, "build 三个方向都必须大于 0（mm）")
+
+    src = Path(p.get("current") or p["source"])
+    try:
+        mesh = meshio_mod.load_mesh(src, mutable=True)
+        result = process_mod.preview_pipeline(mesh, params, list(build) if build else None)
+    except FileNotFoundError:
+        raise HTTPException(404, "模型文件不存在，请重新导入")
+    except Exception as exc:
+        _logger.exception("process-preview failed pid=%s", pid)
+        raise HTTPException(422, f"预检失败：{type(exc).__name__}: {str(exc)[:160]}")
+    result["printer"] = {"key": printer.get("key"), "name": printer.get("name")} if printer else None
+    result["source"] = {"name": Path(p.get("name") or src.name).name, "path": str(src)}
+    return result
+
+
 @app.post("/api/projects/{pid}/process")
 def process(pid: str, payload: dict = Body(...)) -> dict:
     from . import process as process_mod
@@ -779,6 +1152,12 @@ def process(pid: str, payload: dict = Body(...)) -> dict:
     sup = _checked_enum(payload, "supports")
     if sup is not None:
         params["supports"] = sup
+    for key in ("hollow", "orient"):
+        if key in payload:
+            params[key] = _checked_bool(payload, key)
+    # 目标尺寸和缩放倍数同时存在时以目标尺寸为准；显式提醒而不是静默忽略。
+    if float(params.get("target_height") or 0) > 0 and float(params.get("target_max_dim") or 0) > 0:
+        params["target_max_dim"] = 0.0
     return _spawn("process", f"处理 {p['name']}", params, process_mod.run_job, pid)
 
 
@@ -1410,6 +1789,17 @@ def project_checkout(pid: str, payload: dict = Body(...)) -> dict:
     return {"ok": True, "current": str(target)}
 
 
+@app.post("/api/projects/{pid}/history/cleanup")
+def cleanup_project_history(pid: str, keep: int = Query(5, ge=1, le=50)) -> dict:
+    """删掉较老的历史中间文件，只留最近 keep 个版本；历史记录保留。"""
+    if not store.get(pid):
+        raise HTTPException(404, "项目不存在")
+    r = store.cleanup_history(pid, keep)
+    if r is None:
+        raise HTTPException(404, "项目不存在")
+    return r
+
+
 @app.post("/api/projects/{pid}/revert")
 def project_revert(pid: str, payload: dict = Body(default={})) -> dict:
     """回到某个历史版本。index=-1 表示回到刚导入的状态。"""
@@ -1457,9 +1847,22 @@ def _build_report_html(p: dict) -> str:
         for it in items
     ) or '<tr><td colspan="3" class="muted">还没有检测结果</td></tr>'
 
+    def _range_of(x: dict) -> str:
+        """参数区间。单点数字最容易骗人，报告里必须带上 P10–P90。"""
+        out = []
+        for key, unit_default in (("range", ""), ("mass_range", "")):
+            r = x.get(key) or {}
+            if r.get("lo") is None or r.get("hi") is None:
+                continue
+            u = str(r.get("unit") or unit_default)
+            out.append(f"{r.get('lo')}–{r.get('hi')}{u}")
+        return " / ".join(out)
+
     params = "".join(
         f'<tr><td>{esc(str(x.get("label")))}</td>'
-        f'<td class="val">{esc(str(x.get("value")))} {esc(str(x.get("unit") or ""))}</td>'
+        f'<td class="val">{esc(str(x.get("value")))} {esc(str(x.get("unit") or ""))}'
+        + (f'<div class="mono" style="color:#8b93a5">{esc(_range_of(x))}</div>' if _range_of(x) else "")
+        + f'</td>'
         f'<td class="muted">{esc(str(x.get("reason")))}</td></tr>'
         for x in (adv.get("params") or [])
     ) or '<tr><td colspan="3" class="muted">还没有参数建议</td></tr>'
@@ -1471,6 +1874,34 @@ def _build_report_html(p: dict) -> str:
     ) or '<tr><td colspan="3" class="muted">还没有操作记录</td></tr>'
 
     warns = "".join(f"<li>{esc(str(w))}</li>" for w in (adv.get("warnings") or []))
+
+    # 「没测成」必须单独列出来。旧报告只在检测表里写一行 info，
+    # 而整页最醒目的是「严重项 0」和 A/B 级，读者会直接跳过那一行。
+    unconfirmed: list[str] = []
+    for cid in (rep.get("failed_checks") or []):
+        it = next((x for x in items if x.get("id") == cid), {})
+        unconfirmed.append(f"{it.get('name') or cid}：这项检测没有完成，结论未知")
+    for x in items:
+        v = x.get("value") or {}
+        if v.get("degraded") and x.get("id") not in (rep.get("failed_checks") or []):
+            unconfirmed.append(f"{x.get('name')}：{x.get('message')}")
+        if v.get("count_is_lower_bound") or v.get("lower_bound"):
+            unconfirmed.append(f"{x.get('name')}：数值是下限/已采样，不是全量结果")
+    for c in ((rep.get("quality") or {}).get("caveats") or []):
+        unconfirmed.append(str(c))
+    for d in ((rep.get("quality") or {}).get("degraded") or []):
+        unconfirmed.append(f"评分扣项：{d}")
+    conf = (adv.get("confidence") or {})
+    if p.get("analysis_stale"):
+        unconfirmed.insert(0, "模型在检测之后被修改过，这份报告对应的是修改前的几何")
+    unconfirmed_block = ""
+    if unconfirmed:
+        lis = "".join(f"<li>{esc(str(x))}</li>" for x in dict.fromkeys(unconfirmed))
+        unconfirmed_block = (
+            '<div class="warn" style="margin-top:16px;border-color:#4a3410">'
+            '<b style="color:#e8c48a">未确认项（不要当成「通过」）</b>'
+            f'<ul style="margin-top:8px">{lis}</ul></div>'
+        )
 
     q = rep.get("quality") or {}
     grade_color = {"A": "#5dcaa5", "B": "#97c459", "C": "#ef9f27", "D": "#e24b4a"}.get(q.get("grade"), "#888")
@@ -1495,6 +1926,16 @@ def _build_report_html(p: dict) -> str:
 </div>
 <table><tr><th>项目</th><th>得分</th><th style="text-align:right">分数</th><th>说明</th></tr>{bars}</table>
 """
+
+    conf_block = ""
+    if conf:
+        conf_block = (
+            f'<div class="card" style="margin-bottom:14px;min-width:0">'
+            f'<b style="font-size:16px">置信度 {esc(str(conf.get("grade")))}（{esc(str(conf.get("score")))}）</b>'
+            f'<span style="display:block;margin-top:6px">'
+            + "；".join(esc(str(r)) for r in (conf.get("reasons") or []))
+            + "</span></div>"
+        )
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
@@ -1534,6 +1975,8 @@ footer{{margin-top:40px;color:#5f6675;font-size:11px;border-top:1px solid #262b3
   <div class="card"><b>{len(hist)}</b><span>操作次数</span></div>
 </div>
 
+{conf_block}
+{unconfirmed_block}
 {quality_block}
 <h2>检测报告</h2>
 <table><tr><th>项目</th><th>结论</th><th>说明</th></tr>{rows}</table>
@@ -1558,7 +2001,7 @@ def report_html(pid: str) -> Response:
     return Response(
         body.encode("utf-8"),
         media_type="text/html; charset=utf-8",
-        headers={"Content-Disposition": f'inline; filename="{Path(p["name"]).stem}_report.html"'},
+        headers=_download_headers(f"{_display_stem(p['name'])}_report.html", "inline"),
     )
 
 
@@ -1762,6 +2205,13 @@ def advice(
     p = store.get(pid)
     if not p:
         raise HTTPException(404, "项目不存在")
+    # 工艺与方案是枚举，拼错了不能悄悄退回默认值：
+    # 用户会以为拿到的是「光固化」参数，实际是 FDM 的。
+    if process and process.upper() not in ("FDM", "SLA"):
+        raise HTTPException(422, f"process 只能是 FDM/SLA，收到 {process!r}")
+    if plan not in advisor.PLANS:
+        raise HTTPException(
+            422, f"plan 只能是 {'/'.join(sorted(advisor.PLANS))}，收到 {plan!r}")
     overrides: dict = {"plan": plan, "calibrate": calibrate}
     if printer:
         overrides["printer"] = printer
@@ -1845,16 +2295,18 @@ def list_jobs() -> dict:
 
 @app.get("/api/jobs/{jid}")
 def get_job(jid: str) -> dict:
-    j = jobs.MANAGER.get(jid)
-    if not j:
+    snap = jobs.MANAGER.get_snapshot(jid)
+    if not snap:
         raise HTTPException(404, "任务不存在")
-    return _job_out(j)
+    return snap
 
 
 @app.post("/api/jobs/{jid}/{action}")
 def job_action(jid: str, action: str) -> dict:
     if action not in ("pause", "resume", "cancel"):
         raise HTTPException(400, "未知操作")
+    if jobs.MANAGER.get(jid) is None:
+        raise HTTPException(409, "任务已结束，不能继续操作")
     ok = getattr(jobs.MANAGER, action)(jid)
     if not ok:
         raise HTTPException(409, f"当前状态不允许 {action}")
@@ -1904,7 +2356,7 @@ def export_templates() -> Response:
     return Response(
         json.dumps({"version": 1, "templates": items}, ensure_ascii=False, indent=2).encode("utf-8"),
         media_type="application/json",
-        headers={"Content-Disposition": 'attachment; filename="templates.json"'},
+        headers=_download_headers("templates.json"),
     )
 
 
@@ -1961,7 +2413,7 @@ def _load_queue() -> list:
     if QUEUE_FILE.exists():
         try:
             data = json.loads(QUEUE_FILE.read_text(encoding="utf-8"))
-            return data if isinstance(data, list) else []
+            return [x for x in data if isinstance(x, dict) and x.get("id")] if isinstance(data, list) else []
         except Exception:
             return []
     return []
@@ -1969,7 +2421,9 @@ def _load_queue() -> list:
 
 def _save_queue(items: list) -> None:
     QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    QUEUE_FILE.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = QUEUE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, QUEUE_FILE)
 
 
 @app.get("/api/queue")
@@ -1991,11 +2445,14 @@ def add_to_queue(payload: dict = Body(...)) -> dict:
         raise HTTPException(404, "项目不存在")
     items = _load_queue()
     if any(x.get("id") == pid for x in items):
-        return {"ok": True, "items": items, "note": "已在队列中"}
+        return {"ok": True, "items": items, "count": len(items), "note": "已在队列中"}
+    if len(items) >= 200:
+        raise HTTPException(400, "队列最多 200 件，请先移出一些")
+    note = "".join(ch for ch in str(payload.get("note") or "") if ch >= " " and ch != "\x7f").strip()[:100]
     items.append({
         "id": pid, "name": p["name"],
         "added": datetime.now().isoformat(timespec="seconds"),
-        "note": str(payload.get("note") or "")[:100],
+        "note": note,
     })
     _save_queue(items)
     return {"ok": True, "items": items, "count": len(items)}
@@ -2004,10 +2461,22 @@ def add_to_queue(payload: dict = Body(...)) -> dict:
 @app.delete("/api/queue/{index}")
 def remove_from_queue(index: int) -> dict:
     items = _load_queue()
+    removed = None
     if 0 <= index < len(items):
-        items.pop(index)
+        removed = items.pop(index)
         _save_queue(items)
-    return {"ok": True, "items": items, "count": len(items)}
+    return {"ok": True, "removed": removed, "items": items, "count": len(items)}
+
+
+@app.post("/api/queue/prune")
+def prune_queue() -> dict:
+    """移除已经删除的项目，避免队列里挂着永远打不了的空条目。"""
+    items = _load_queue()
+    keep = [x for x in items if store.get(str(x.get("id") or ""))]
+    removed = len(items) - len(keep)
+    if removed:
+        _save_queue(keep)
+    return {"ok": True, "removed": removed, "items": keep, "count": len(keep)}
 
 
 @app.post("/api/queue/reorder")
@@ -2015,10 +2484,29 @@ def reorder_queue(payload: dict = Body(...)) -> dict:
     order = [str(x) for x in (payload.get("order") or [])]
     items = _load_queue()
     by_id = {str(x.get("id")): x for x in items}
-    new = [by_id[i] for i in order if i in by_id]
-    new += [x for x in items if str(x.get("id")) not in order]
+    seen: set[str] = set()
+    new = []
+    for i in order:
+        if i in by_id and i not in seen:
+            seen.add(i)
+            new.append(by_id[i])
+    new += [x for x in items if str(x.get("id")) not in seen]
     _save_queue(new)
-    return {"ok": True, "items": new, "count": len(new)}
+    return {"ok": True, "items": new, "count": len(new),
+            "ignored": [i for i in order if i not in by_id]}
+
+
+def _csv_safe(value) -> str:
+    """Excel 会把 = + - @ 开头的单元格当公式执行。
+
+    项目名/错误信息来自用户文件或第三方库，直接写进 CSV 可能在别人打开时
+    触发公式（CSV injection）。前置一个单引号让 Excel 按文本处理。
+    """
+    s = "" if value is None else str(value)
+    s = "".join(ch for ch in s if ch >= " " or ch in "\t\n")
+    if s[:1] in ("=", "+", "-", "@"):
+        return "'" + s
+    return s
 
 
 @app.get("/api/batch/report.csv")
@@ -2039,19 +2527,19 @@ def batch_report_csv() -> Response:
     w.writerow(["项目", "状态", "阶段", "面数", "输出", "错误", "警告"])
     for it in rep.get("items") or []:
         w.writerow([
-            it.get("name", ""),
-            it.get("status", ""),
-            it.get("stage", ""),
+            _csv_safe(it.get("name", "")),
+            _csv_safe(it.get("status", "")),
+            _csv_safe(it.get("stage", "")),
             it.get("faces", ""),
-            Path(it.get("output", "")).name if it.get("output") else "",
-            it.get("error", ""),
-            " | ".join(it.get("warnings") or []),
+            _csv_safe(Path(it.get("output", "")).name if it.get("output") else ""),
+            _csv_safe(it.get("error", "")),
+            _csv_safe(" | ".join(it.get("warnings") or [])),
         ])
     body = "\ufeff" + buf.getvalue()  # BOM，Excel 打开不乱码
     return Response(
         body.encode("utf-8"),
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": 'attachment; filename="batch_report.csv"'},
+        headers=_download_headers("batch_report.csv"),
     )
 
 
@@ -2078,12 +2566,20 @@ def batch_export_zip(ids: str = Query("", description="逗号分隔的项目 id�
 
     buf = _io.BytesIO()
     manifest = []
+    used: set[str] = set()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for p in projects:
             src = Path(p.get("current") or p.get("source") or "")
             if not src.exists():
                 continue
-            name = f"{Path(p['name']).stem}_{p['id'][:6]}{src.suffix}"
+            # 项目名可能带 / 或 Windows 非法字符，直接拼进 zip 会造出目录或坏条目
+            base = f"{_display_stem(p['name'])}_{p['id'][:6]}"
+            name = f"{base}{src.suffix.lower()}"
+            n = 2
+            while name.lower() in used:
+                name = f"{base}_{n}{src.suffix.lower()}"
+                n += 1
+            used.add(name.lower())
             z.write(src, name)
             st = (p.get("analysis") or {}).get("stats") or {}
             manifest.append({
@@ -2094,7 +2590,7 @@ def batch_export_zip(ids: str = Query("", description="逗号分隔的项目 id�
     return Response(
         buf.getvalue(),
         media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="models.zip"'},
+        headers=_download_headers("models.zip"),
     )
 
 
@@ -2126,7 +2622,7 @@ def download(
         src = Path(p.get("current") or p["source"])
         if not src.exists():
             raise HTTPException(404, "模型文件不存在")
-        return FileResponse(src, media_type="model/stl", filename=f"{Path(p['name']).stem}_processed.stl")
+        return FileResponse(src, media_type="model/stl", filename=f"{_display_stem(p['name'])}_processed.stl")
     if kind in ("obj", "ply"):
         from . import meshio
 
@@ -2143,7 +2639,7 @@ def download(
         return Response(
             buf.getvalue(),
             media_type=media,
-            headers={"Content-Disposition": f'attachment; filename="{Path(p["name"]).stem}.{kind}"'},
+            headers=_download_headers(f"{_display_stem(p['name'])}.{kind}"),
         )
     if kind == "3mf":
         from . import meshio
@@ -2160,7 +2656,7 @@ def download(
         return Response(
             buf.getvalue(),
             media_type="model/3mf",
-            headers={"Content-Disposition": f'attachment; filename="{Path(p["name"]).stem}.3mf"'},
+            headers=_download_headers(f"{_display_stem(p['name'])}.3mf"),
         )
     if kind == "slicer":
         from . import advisor
@@ -2207,7 +2703,7 @@ def download(
         return Response(
             json.dumps(cfg, ensure_ascii=False, indent=2).encode("utf-8"),
             media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="{Path(p["name"]).stem}_slicer.json"'},
+            headers=_download_headers(f"{_display_stem(p['name'])}_slicer.json"),
         )
     if kind == "config":
         from . import advisor
@@ -2217,14 +2713,14 @@ def download(
         return Response(
             buf.getvalue(),
             media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="{Path(p["name"]).stem}_params.json"'},
+            headers=_download_headers(f"{_display_stem(p['name'])}_params.json"),
         )
     if kind == "report":
         body = json.dumps(p.get("analysis") or {}, ensure_ascii=False, indent=2)
         return Response(
             body.encode("utf-8"),
             media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="{Path(p["name"]).stem}_report.json"'},
+            headers=_download_headers(f"{_display_stem(p['name'])}_report.json"),
         )
     lines = [f"项目: {p['name']}  id={p['id']}", f"创建: {p['created']}", ""]
     for h in p.get("history", []):
@@ -2235,17 +2731,39 @@ def download(
     return Response(
         body,
         media_type="text/plain; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{Path(p["name"]).stem}_log.txt"'},
+        headers=_download_headers(f"{_display_stem(p['name'])}_log.txt"),
     )
 
 
 # ---------------------------------------------------------------- 静态
+def _asset_url(name: str) -> str:
+    """给静态资源带上文件版本号（纳秒 mtime + 大小），升级后 URL 变化，浏览器不会继续跑旧脚本。"""
+    try:
+        st = (STATIC / name).stat()
+        v = f"{st.st_mtime_ns:x}-{st.st_size:x}"
+    except OSError:
+        v = "0"
+    return f"/static/{name}?v={v}"
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     f = STATIC / "index.html"
     if not f.exists():
         return "<h1>界面尚未生成</h1>"
-    return f.read_text(encoding="utf-8")
+    html = f.read_text(encoding="utf-8")
+    return (html.replace("/static/style.css", _asset_url("style.css"))
+                .replace("/static/app.js", _asset_url("app.js")))
+
+
+@app.get("/static/app.js", include_in_schema=False)
+def app_script() -> Response:
+    """app.js 里 import 的 viewer.js 也带版本号，避免只刷新一半模块。"""
+    f = STATIC / "app.js"
+    js = f.read_text(encoding="utf-8")
+    viewer = _asset_url("viewer.js").removeprefix("/static/")
+    js = js.replace('from "./viewer.js"', f'from "./{viewer}"', 1)
+    return Response(js, media_type="application/javascript; charset=utf-8")
 
 
 if STATIC.exists():
@@ -2256,6 +2774,13 @@ if STATIC.exists():
 def _startup() -> None:
     jobs.MANAGER.start()
     _warm_gpu()
+    # 中间产物只在「断点续跑」期间有用；任务记录没了就是死重量
+    try:
+        r = jobs.cleanup_orphan_tmp()
+        if r.get("removed"):
+            _logger.info("回收中间产物 %s 个目录，释放 %.1fMB", r["removed"], r["freed_mb"])
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("回收中间产物失败（不影响启动）：%s", e)
 
 
 def _warm_gpu() -> None:

@@ -2,6 +2,10 @@ import { Viewer, b64ToTyped, round } from "./viewer.js";
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+/** 插入 HTML 前统一转义用户可控文本（项目名/标签来自上传与重命名）。 */
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => (
+  { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+));
 
 const S = {
   step: 0,
@@ -16,6 +20,7 @@ const S = {
   viewers: [],
   showOriginal: false,
   repairActions: ["merge_vertices", "fill_holes", "fix_normals", "remove_small"],
+  repairPlan: null,   // 检测报告驱动的修复建议（动作、原因、待确认项）
   lastRepair: null,   // 上次修复的结构化结果（含回退/降级原因）
   lastProcess: null,  // 上次处理的结果摘要与警告
   rescaleFactor: 1,
@@ -23,10 +28,18 @@ const S = {
     decimate_ratio: 1.0, hollow: false, wall_thickness: 2.0, drain_holes: 2,
     hole_diameter: 3.0, supports: "none", overhang_deg: 45.0,
     support_diameter: 1.0, support_spacing: 3.0, support_points: [], orient: true, scale: 1.0,
+    target_height: 0, target_max_dim: 0,
   },
+  procPreview: null,     // 轻量预检缓存 {pid, key, data}
+  procPreviewBusy: false,
   batchSel: new Set(),
   search: "",
   favOnly: false,
+  scanMode: "full",       // "quick" | "full"
+  analysisFilter: "all",  // "all" | "issues" | "errors"
+  page: 1,
+  pageSize: 20,
+  sort: "updated",
   redoStack: [],
   borePoints: [],
   layout: "list",     // "list" | "grid"（文件列表排布）
@@ -77,14 +90,32 @@ function tourSeen() {
   try { return localStorage.getItem("tpf_tour_done") === "1"; } catch { return true; }
 }
 
+function trapFocus(ov) {
+  // 弹层打开时把 Tab 限制在卡片内，Esc/关闭后由调用方恢复原焦点
+  ov.addEventListener("keydown", (e) => {
+    if (e.key !== "Tab") return;
+    const items = [...ov.querySelectorAll(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    )].filter((el) => !el.disabled && el.offsetParent !== null);
+    if (!items.length) return;
+    const first = items[0], last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
+}
+
 function showTour(force) {
   if (!force && tourSeen()) return;
   // 已经有引导层就不再叠一层（上传/切步骤会重渲染，容易被重复触发）
   if ($("#tour-overlay")) return;
+  const previousFocus = document.activeElement;
   let i = 0;
   const ov = document.createElement("div");
   ov.id = "tour-overlay";
   ov.className = "tour-overlay";
+  ov.setAttribute("role", "dialog");
+  ov.setAttribute("aria-modal", "true");
+  ov.setAttribute("aria-label", "新手引导");
   const render = () => {
     const st = TOUR_STEPS[i];
     ov.innerHTML = `<div class="tour-card">
@@ -105,17 +136,21 @@ function showTour(force) {
       i++; render();
     };
     if ($("#tour-prev")) $("#tour-prev").onclick = () => { i--; render(); };
+    $("#tour-next")?.focus();
   };
   const close = () => {
     try { localStorage.setItem("tpf_tour_done", "1"); } catch {}
     ov.remove();
+    if (previousFocus && previousFocus.focus) previousFocus.focus();
   };
   ov.onclick = (e) => { if (e.target === ov) close(); };
   document.body.appendChild(ov);
+  trapFocus(ov);
   render();
 }
 
 const SHORTCUTS = [
+  ["1 – 6", "直接跳到导入 / 检测 / 修复 / 处理 / 建议 / 导出"],
   ["Ctrl + Z", "撤销一步"],
   ["Ctrl + Y / Ctrl + Shift + Z", "重做"],
   ["?", "打开这个帮助面板"],
@@ -127,9 +162,13 @@ const SHORTCUTS = [
 function showShortcuts() {
   const old = $("#help-overlay");
   if (old) { old.remove(); return; }
+  const previousFocus = document.activeElement;
   const ov = document.createElement("div");
   ov.id = "help-overlay";
   ov.className = "tour-overlay";
+  ov.setAttribute("role", "dialog");
+  ov.setAttribute("aria-modal", "true");
+  ov.setAttribute("aria-label", "快捷键与操作");
   ov.innerHTML = `<div class="tour-card">
     <div class="tour-step">帮助</div>
     <h3>快捷键与操作</h3>
@@ -147,12 +186,18 @@ function showShortcuts() {
       <button class="primary" id="help-close">知道了</button>
     </div>
   </div>`;
-  ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
+  const close = () => {
+    ov.remove();
+    if (previousFocus && previousFocus.focus) previousFocus.focus();
+  };
+  ov.onclick = (e) => { if (e.target === ov) close(); };
   document.body.appendChild(ov);
-  $("#help-close").onclick = () => ov.remove();
+  trapFocus(ov);
+  $("#help-close").onclick = close;
   $("#help-tour").onclick = () => { ov.remove(); showTour(true); };
   $("#help-shortcut").onclick = (e) => createDesktopShortcut(e.currentTarget, $("#help-shortcut-status"));
   refreshShortcutStatus($("#help-shortcut-status"));
+  $("#help-close")?.focus();
 }
 
 /** 查一下桌面快捷方式建没建，更新一行状态文案 */
@@ -230,10 +275,17 @@ async function api(path, opts = {}) {
 }
 
 function toast(msg, kind = "") {
+  const box = $("#toasts");
+  if (!box) return;
+  // 屏幕阅读器需要显式 live region；错误用 assertive，普通提示用 polite
   const d = document.createElement("div");
   d.className = "toast " + kind;
   d.textContent = msg;
-  $("#toasts").appendChild(d);
+  d.setAttribute("role", kind === "err" ? "alert" : "status");
+  d.setAttribute("aria-live", kind === "err" ? "assertive" : "polite");
+  box.appendChild(d);
+  // 连续导入/批量操作时别把屏幕堆满，只保留最近 6 条
+  while (box.children.length > 6) box.firstChild.remove();
   setTimeout(() => d.remove(), kind === "err" ? 7000 : 3800);
 }
 
@@ -258,6 +310,57 @@ function fmtEta(s) {
   if (s == null || !isFinite(s)) return "";
   if (s < 60) return `剩余 ${Math.ceil(s)} 秒`;
   return `剩余 ${Math.floor(s / 60)} 分 ${Math.round(s % 60)} 秒`;
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch { return false; }
+  }
+}
+
+async function copyAnalysisReport() {
+  const rep = S.analysis;
+  if (!rep) return toast("还没有检测报告", "warn");
+  const p = S.project || {};
+  const q = rep.quality || {};
+  const lines = [
+    "3D Print Forge 检测报告",
+    `项目：${p.name || "-"}`,
+    `时间：${rep.at || "-"}`,
+    `模型：${rep.stats?.faces ?? "-"} 面 / ${rep.stats?.vertices ?? "-"} 顶点`,
+    `健康度：${q.score ?? "-"} / 100（${q.grade || "-"}）${q.verdict ? " · " + q.verdict : ""}`,
+    "",
+  ];
+  for (const it of rep.items || []) {
+    const v = it.value || {};
+    const bits = [];
+    if (it.id === "watertight") bits.push(`开放边 ${v.boundary_edges ?? "-"}`, `非流形边 ${v.nonmanifold_edges ?? 0}`);
+    if (it.id === "normals") bits.push(`朝内组件 ${v.inverted_components ?? 0}`, `绕序冲突 ${v.winding_conflicts ?? 0}`);
+    if (it.id === "thickness") bits.push(`最薄 ${v.min ?? "-"}mm`, `中位 ${v.median ?? "-"}mm`);
+    if (it.id === "components") bits.push(`连通体 ${v.components ?? "-"}`, `碎屑 ${v.tiny ?? 0}`);
+    if (it.id === "self_intersection") bits.push(`穿插 ${v.count ?? 0} 处`);
+    if (it.id === "units") bits.push(`单位 ${v.unit || "-"}`);
+    lines.push(`[${SEV[it.severity] || it.severity}] ${it.name}：${it.message}`);
+    if (bits.length) lines.push(`  数据：${bits.join(" · ")}`);
+    if (it.fix) lines.push(`  建议：${it.fix.label}`);
+  }
+  if (q.degraded?.length) lines.push("", `未确认项：${q.degraded.join("、")}`);
+  const ok = await copyText(lines.join("\n"));
+  if (ok) toast("检测报告已复制到剪贴板", "ok");
+  else toast("复制失败，请手动选择文本", "err");
 }
 
 /* ---------------------------------------------------------------- 3D 预览 */
@@ -405,16 +508,36 @@ function guideOf(id) {
 }
 
 /* ---------------------------------------------------------------- 渲染 */
+function hashTarget() {
+  const m = /(?:^|[#&])p=([^&]+)/.exec(location.hash || "");
+  const s = /(?:^|[#&])s=(\d+)/.exec(location.hash || "");
+  return {
+    pid: m ? decodeURIComponent(m[1]) : null,
+    step: s ? Math.min(5, Math.max(0, Number(s[1]))) : null,
+  };
+}
+
+function syncHash() {
+  // 刷新/分享链接后还能回到同一个项目和步骤；replaceState 不污染前进后退栈
+  try {
+    const want = S.pid ? `#p=${encodeURIComponent(S.pid)}&s=${S.step}` : location.pathname + location.search;
+    const cur = S.pid ? location.hash : location.pathname + location.search;
+    if (cur !== want) history.replaceState(null, "", want);
+  } catch { /* file:// 或受限环境忽略 */ }
+}
+
 function render() {
   disposeViewers();
   const stage = $("#stage");
-  if (S.step === 0) return renderImport(stage);
-  if (!S.pid) return renderImport(stage);
-  if (S.step === 1) return renderInspect(stage);
-  if (S.step === 2) return renderRepair(stage);
-  if (S.step === 3) return renderProcess(stage);
-  if (S.step === 4) return renderAdvice(stage);
-  if (S.step === 5) return renderExport(stage);
+  let out;
+  if (S.step === 0 || !S.pid) out = renderImport(stage);
+  else if (S.step === 1) out = renderInspect(stage);
+  else if (S.step === 2) out = renderRepair(stage);
+  else if (S.step === 3) out = renderProcess(stage);
+  else if (S.step === 4) out = renderAdvice(stage);
+  else if (S.step === 5) out = renderExport(stage);
+  syncHash();
+  return out;
 }
 
 /* ---- 导入 */
@@ -429,14 +552,26 @@ function renderImport(stage) {
     $("#btn-pick2").onclick = () => $("#file-input").click();
     return;
   }
-  const q = (S.search || "").toLowerCase();
+  const q = (S.search || "").trim().toLowerCase();
   let list = S.projects.filter((p) => {
     if (S.favOnly && !p.favorite) return false;
     if (!q) return true;
     return (p.name || "").toLowerCase().includes(q)
       || (p.tags || []).some((t) => t.toLowerCase().includes(q));
   });
-  list = [...list].sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0));
+  const sorters = {
+    updated: (a, b) => String(b.updated || "").localeCompare(String(a.updated || "")),
+    created: (a, b) => String(b.created || "").localeCompare(String(a.created || "")),
+    name: (a, b) => String(a.name || "").localeCompare(String(b.name || ""), "zh-Hans-CN"),
+    size: (a, b) => (b.size_bytes || 0) - (a.size_bytes || 0),
+    issues: (a, b) => (b.issues || 0) - (a.issues || 0),
+  };
+  list = [...list].sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0)
+    || (sorters[S.sort] || sorters.updated)(a, b));
+  const pageSize = Math.max(5, Number(S.pageSize) || 20);
+  const pages = Math.max(1, Math.ceil(list.length / pageSize));
+  S.page = Math.min(Math.max(1, S.page | 0), pages);
+  const shown = list.slice((S.page - 1) * pageSize, S.page * pageSize);
   const grid = S.layout === "grid";
   const sevPill = (p) => {
     const sev = p.severity;
@@ -444,16 +579,18 @@ function renderImport(stage) {
     return sev ? `<span class="pill ${pill}">${SEV[sev] || sev}</span>` : '<span class="pill">未检测</span>';
   };
   const opsBtns = (p) => `<button data-rename="${p.id}" title="重命名">改名</button>
-      <button data-tag="${p.id}" title="编辑标签">标签</button>`;
-  const rows = list.map((p) => {
-    const tags = (p.tags || []).map((t) => `<span class="pill tag clickable" data-tagfilter="${t}">${t}</span>`).join("");
+      <button data-tag="${p.id}" title="编辑标签">标签</button>
+      <button data-dup="${p.id}" title="复制为独立项目">复制</button>
+      <button data-del="${p.id}" class="danger" title="删除项目">删除</button>`;
+  const rows = shown.map((p) => {
+    const tags = (p.tags || []).map((t) => `<span class="pill tag clickable" data-tagfilter="${esc(t)}">${esc(t)}</span>`).join("");
     if (grid) {
       return `<div class="project-card ${p.id === S.pid ? "active" : ""}" data-pid="${p.id}">
         <div class="pc-top">
           <span class="fav ${p.favorite ? "on" : ""}" data-fav="${p.id}" title="收藏">${p.favorite ? "★" : "☆"}</span>
           ${sevPill(p)}
         </div>
-        <div class="pc-name" title="${p.name}">${p.name}</div>
+        <div class="pc-name" title="${esc(p.name)}">${esc(p.name)}</div>
         <div class="pc-tags">${tags}</div>
         <div class="pc-meta">
           <div><span class="k">类型</span><span class="v">${p.file_type || "?"}</span></div>
@@ -467,7 +604,7 @@ function renderImport(stage) {
     return `<div class="project-row ${p.id === S.pid ? "active" : ""}" data-pid="${p.id}">
       <span class="fav ${p.favorite ? "on" : ""}" data-fav="${p.id}" title="收藏">${p.favorite ? "★" : "☆"}</span>
       <div class="pr-main">
-        <div class="pr-line1"><span class="project-name">${p.name}</span>${tags}${sevPill(p)}</div>
+        <div class="pr-line1"><span class="project-name">${esc(p.name)}</span>${tags}${sevPill(p)}</div>
         <div class="pr-line2">
           <span class="pm-type">${p.file_type || "?"}</span>
           <span class="pm-size">${fmtBytes(p.size_bytes || 0)}</span>
@@ -489,9 +626,16 @@ function renderImport(stage) {
       </div>
       <div class="block-body">
         <div class="row" style="margin-bottom:10px">
-          <input type="text" id="proj-search" placeholder="搜索名称或标签…" value="${S.search}"
+          <input type="text" id="proj-search" placeholder="搜索名称或标签…" value="${esc(S.search)}"
                  style="flex:1;max-width:280px">
           <button class="ghost ${S.favOnly ? "on" : ""}" id="btn-fav-only">只看收藏</button>
+          <select id="proj-sort" title="排序方式" style="width:130px">
+            <option value="updated" ${S.sort === "updated" ? "selected" : ""}>最近修改</option>
+            <option value="created" ${S.sort === "created" ? "selected" : ""}>最近导入</option>
+            <option value="name" ${S.sort === "name" ? "selected" : ""}>名称</option>
+            <option value="size" ${S.sort === "size" ? "selected" : ""}>文件大小</option>
+            <option value="issues" ${S.sort === "issues" ? "selected" : ""}>问题数量</option>
+          </select>
           <div class="layout-switch" id="layout-switch" role="group" aria-label="排列方式">
             <button class="seg ${grid ? "" : "on"}" data-layout="list" title="纵向列表">☰ 列表</button>
             <button class="seg ${grid ? "on" : ""}" data-layout="grid" title="网格式">▦ 网格</button>
@@ -511,6 +655,11 @@ function renderImport(stage) {
                <button class="ghost" id="btn-shortcut-empty">创建桌面快捷方式</button>
              </div>`
           : '<div class="queue-empty">没有匹配的模型</div>')}</div>
+        ${pages > 1 ? `<div class="row" id="proj-pager" style="justify-content:center;margin-top:12px">
+          <button class="ghost" data-page="prev" ${S.page <= 1 ? "disabled" : ""}>上一页</button>
+          <span class="dim" style="font-size:11px">第 ${S.page} / ${pages} 页</span>
+          <button class="ghost" data-page="next" ${S.page >= pages ? "disabled" : ""}>下一页</button>
+        </div>` : ""}
       </div>
     </div>
     <div class="block">
@@ -519,6 +668,7 @@ function renderImport(stage) {
       <div class="block-body">
         <div class="row" style="margin-bottom:10px">
           <button class="ghost" id="btn-queue-add">把当前项目加入队列</button>
+          <button class="ghost" id="btn-queue-prune" title="移除已经被删除的项目">清理失效项</button>
         </div>
         <div id="queue-list"><div class="queue-empty">队列为空</div></div>
       </div>
@@ -530,7 +680,7 @@ function renderImport(stage) {
         <div class="project-list" id="batch-list">
           ${S.projects.map((p) => `<label class="check-row ${S.batchSel.has(p.id) ? "on" : ""}" data-batch="${p.id}">
             <input type="checkbox" ${S.batchSel.has(p.id) ? "checked" : ""}>
-            <span>${p.name}</span>
+            <span>${esc(p.name)}</span>
             <small>${p.id}</small>
           </label>`).join("") || '<div class="queue-empty">先导入模型</div>'}
         </div>
@@ -573,7 +723,9 @@ function renderImport(stage) {
 
   $("#btn-add").onclick = () => $("#file-input").click();
   $$(".project-row, .project-card", stage).forEach((el) => el.onclick = (e) => {
-    if (e.target.closest("[data-fav],[data-rename],[data-tag]")) return;
+    if (e.target.closest("[data-fav],[data-rename],[data-tag],[data-dup],[data-del]")) return;
+    // 在导入页点当前项目：切到检测页，而不是因为 pid 没变继续停在列表
+    if (el.dataset.pid === S.pid && S.step === 0) { S.step = 1; renderSteps(); }
     loadProject(el.dataset.pid);
   });
   $$("#layout-switch [data-layout]").forEach((el) => el.onclick = () => {
@@ -583,9 +735,29 @@ function renderImport(stage) {
   });
   const search = $("#proj-search");
   if (search) {
-    search.oninput = (e) => { S.search = e.target.value; render(); };
-    search.onkeydown = (e) => { if (e.key === "Escape") { S.search = ""; render(); } };
+    search.oninput = (e) => {
+      S.search = e.target.value;
+      S.page = 1;
+      render();
+      // 列表整体重绘后把焦点和光标还回搜索框，否则每输入一个字就失焦
+      const next = $("#proj-search");
+      if (next) {
+        next.focus();
+        const end = next.value.length;
+        try { next.setSelectionRange(end, end); } catch { /* 忽略 */ }
+      }
+    };
+    search.onkeydown = (e) => { if (e.key === "Escape") { S.search = ""; S.page = 1; render(); } };
   }
+  if ($("#proj-sort")) $("#proj-sort").onchange = (e) => {
+    S.sort = e.target.value;
+    S.page = 1;
+    render();
+  };
+  $$("[data-page]", stage).forEach((el) => el.onclick = () => {
+    S.page += el.dataset.page === "next" ? 1 : -1;
+    render();
+  });
   if ($("#btn-fav-only")) $("#btn-fav-only").onclick = () => { S.favOnly = !S.favOnly; render(); };
   $$("[data-tagfilter]", stage).forEach((el) => el.onclick = (e) => {
     e.stopPropagation();
@@ -639,6 +811,31 @@ function renderImport(stage) {
       toast(tags.length ? `已打 ${tags.length} 个标签` : "已清除标签");
     } catch (err) { toast("操作失败：" + err.message, "err"); }
   });
+  $$("[data-del]", stage).forEach((el) => el.onclick = async (e) => {
+    e.stopPropagation();
+    const id = el.dataset.del;
+    const cur = S.projects.find((x) => x.id === id);
+    if (!cur) return;
+    if (!confirm(`删除「${cur.name}」？\n\n项目记录会删除；如果文件没有被其他项目共享，也会一并清理。此操作不可撤销。`)) return;
+    try {
+      await api(`/api/projects/${id}`, { method: "DELETE" });
+      if (S.pid === id) { S.pid = null; S.project = null; S.analysis = null; S.advice = null; S.step = 0; }
+      S.batchSel.delete(id);
+      await loadProjects();
+      render();
+      toast("项目已删除");
+    } catch (err) { toast("删除失败：" + err.message, "err"); }
+  });
+  $$("[data-dup]", stage).forEach((el) => el.onclick = async (e) => {
+    e.stopPropagation();
+    const id = el.dataset.dup;
+    try {
+      const p = await api(`/api/projects/${id}/duplicate`, { method: "POST" });
+      await loadProjects();
+      render();
+      toast(`已复制为「${p.name}」`);
+    } catch (err) { toast("复制失败：" + err.message, "err"); }
+  });
   $$("[data-batch]", stage).forEach((el) => el.onclick = (e) => {
     e.preventDefault();
     const id = el.dataset.batch;
@@ -688,7 +885,8 @@ function renderImport(stage) {
       const r = await api("/api/projects/import-bundle", { method: "POST", body: fd });
       await loadProjects();
       await loadProject(r.id);
-      toast(`已导入「${r.name}」`);
+      toast(`已导入「${r.name}」${r.restored ? `，恢复 ${r.history} 个历史版本` : ""}`);
+      if (r.note) setTimeout(() => toast(r.note), 700);
     } catch (err) { toast("导入失败：" + err.message, "err"); }
   };
   $("#btn-zip").onclick = () => {
@@ -710,15 +908,35 @@ function renderInspect(stage) {
   const p = S.project;
   const rep = S.analysis;
   const body = rep ? reportHTML(rep) : `<div class="queue-empty">还没有检测结果</div>`;
+  const scanCost = rep ? (rep.items || []).reduce((n, it) => n + (Number(it.elapsed) || 0), 0) : 0;
+  const stale = !!(p && p.analysis_stale && rep);
   stage.innerHTML = `
     ${guideOf("inspect")}
+    ${stale ? `<div class="block-banner soft">
+      <div class="bb-icon">!</div>
+      <div class="bb-body">
+        <b>这份检测报告已过期</b>
+        <span>模型在上次检测之后被缩放 / 旋转 / 打孔 / 处理过，报告里的壁厚、体积、水密结论都还是上一版文件的。
+          参数建议会按当前文件重测几何，但要得到可靠的检测结论，请重新检测。</span>
+        <div class="row" style="margin-top:8px"><button class="ghost" id="btn-rescan-stale">重新检测</button></div>
+      </div>
+    </div>` : ""}
     <div class="block">
       <div class="block-head">
-        <div><div class="block-title">${p ? p.name : ""}</div>
-          <div class="block-sub">${rep ? `共 ${rep.summary.total} 项 · 最严重：${SEV[rep.summary.worst]}` : "尚未检测"}</div></div>
+        <div><div class="block-title">${esc(p ? p.name : "")}</div>
+          <div class="block-sub">${rep ? `共 ${rep.summary.total} 项 · 最严重：${SEV[rep.summary.worst]} · 各项耗时合计 ${scanCost.toFixed(2)}s` : "尚未检测"}</div></div>
         <button class="primary" id="btn-scan">${rep ? "重新检测" : "开始检测"}</button>
       </div>
       <div class="block-body">
+        <div class="scan-modes">
+          <button class="ghost small ${S.scanMode === "quick" ? "on" : ""}" data-scan-mode="quick"
+            title="壁厚只做粗筛，并跳过自相交检测">快速扫描</button>
+          <button class="ghost small ${S.scanMode === "full" ? "on" : ""}" data-scan-mode="full"
+            title="壁厚采样更密，并检查三角形自相交">完整扫描</button>
+          <span class="dim" style="font-size:11px">${S.scanMode === "quick"
+            ? "跳过自相交、壁厚只粗筛：更快，但局部薄壁和穿插可能漏检。"
+            : "壁厚全量采样 + 自相交检查：更慢，结论更可靠。"}</span>
+        </div>
         <div class="viewer-wrap" id="viewer"></div>
         <div class="row" style="margin-top:10px">
           <button class="ghost" id="btn-wire">线框</button>
@@ -762,6 +980,15 @@ function renderInspect(stage) {
     <div class="block">
       <div class="block-head"><div class="block-title">检测报告</div>
         <div class="block-sub">每项都带可执行的修复动作</div></div>
+      ${rep ? `<div class="report-tools">
+        ${[
+          ["all", `全部 ${rep.summary?.total ?? (rep.items || []).length}`],
+          ["issues", `只看问题 ${((rep.summary?.counts?.error || 0) + (rep.summary?.counts?.warning || 0))}`],
+          ["errors", `只看错误 ${rep.summary?.counts?.error || 0}`],
+        ].map(([k, label]) => `<button class="ghost small ${S.analysisFilter === k ? "on" : ""}" data-report-filter="${k}">${label}</button>`).join("")}
+        <span class="spacer"></span>
+        <button class="ghost small" id="btn-copy-report" title="复制为纯文本，方便发到群里或贴进工单">复制报告</button>
+      </div>` : ""}
       ${body}
     </div>
     ${rep && rep.quality ? scorePanel(rep.quality) : ""}
@@ -783,6 +1010,18 @@ function renderInspect(stage) {
 
   mountViewer("viewer", S.showOriginal ? "original" : "current");
   $("#btn-scan").onclick = runAnalyze;
+  if ($("#btn-rescan-stale")) $("#btn-rescan-stale").onclick = runAnalyze;
+  $$("[data-scan-mode]", stage).forEach((el) => el.onclick = () => {
+    if (S.scanMode === el.dataset.scanMode) return;
+    S.scanMode = el.dataset.scanMode;
+    render();
+  });
+  $$("[data-report-filter]", stage).forEach((el) => el.onclick = () => {
+    S.analysisFilter = el.dataset.reportFilter;
+    render();
+  });
+  const copyRep = $("#btn-copy-report");
+  if (copyRep) copyRep.onclick = () => copyAnalysisReport();
   if ($("#btn-profile")) $("#btn-profile").onclick = loadProfile;
   if ($("#btn-tri-hist")) $("#btn-tri-hist").onclick = renderTriHist;
   $("#btn-wire").onclick = (e) => {
@@ -911,6 +1150,23 @@ function scorePanel(q) {
   const off = c * (1 - Math.min(100, q.score) / 100);
   const color = q.grade === "A" ? "#5dcaa5" : q.grade === "B" ? "#97c459"
               : q.grade === "C" ? "#ef9f27" : "#e24b4a";
+  const hist = (S.project?.analysis_history || []).filter((x) => Number.isFinite(Number(x.score))).slice(-8);
+  let trend = "";
+  if (hist.length > 1) {
+    const delta = Number(hist[hist.length - 1].score) - Number(hist[0].score);
+    const arrow = delta > 0 ? `↑ +${delta.toFixed(1)}` : delta < 0 ? `↓ ${delta.toFixed(1)}` : "→ 持平";
+    const bars = hist.map((x) => {
+      const sc = Math.max(0, Math.min(100, Number(x.score)));
+      const col = sc >= 90 ? "#5dcaa5" : sc >= 75 ? "#97c459" : sc >= 60 ? "#ef9f27" : "#e24b4a";
+      return `<i style="height:${Math.max(4, sc * 0.32)}px;background:${col}" title="${esc(x.at || "")} · ${x.score} 分 · ${x.grade || ""}"></i>`;
+    }).join("");
+    trend = `<div class="score-trend">
+      <div class="score-trend-head"><span>最近 ${hist.length} 次检测</span>
+        <b style="color:${delta > 0 ? "#5dcaa5" : delta < 0 ? "#e24b4a" : "#8b93a5"}">${arrow}</b></div>
+      <div class="score-trend-bars">${bars}</div>
+      <div class="field-help">柱高按分数缩放；悬停看时间。修复后复检即可看到趋势。</div>
+    </div>`;
+  }
   return `<div class="block">
     <div class="block-head"><div class="block-title">网格质量</div>
       <div class="block-sub">七项检测的综合评分</div></div>
@@ -933,6 +1189,7 @@ function scorePanel(q) {
           </div>`).join("")}
         </div>
       </div>
+      ${trend}
     </div>
   </div>`;
 }
@@ -1084,7 +1341,20 @@ function reportHTML(rep) {
          评分等级已按「未确认」封顶，请补测或人工确认后再打印。
        </div>`
     : "";
-  return banner + rep.items.map((it) => {
+  const keep = S.analysisFilter === "issues"
+    ? (it) => it.severity === "error" || it.severity === "warning"
+    : S.analysisFilter === "errors"
+      ? (it) => it.severity === "error"
+      : () => true;
+  const rank = { error: 0, warning: 1, info: 2, ok: 3 };
+  const rows = (rep.items || [])
+    .filter(keep)
+    .sort((a, b) => (rank[a.severity] ?? 9) - (rank[b.severity] ?? 9));
+  if (!rows.length) {
+    return banner + `<div class="queue-empty">当前筛选下没有条目${
+      unconfirmed.size ? "；但上方有未确认项，请补测" : "，所有检查都通过了"}。</div>`;
+  }
+  return banner + rows.map((it) => {
     const err = (it.value || {}).error;
     const bad = err || unconfirmed.has(it.id);
     return `
@@ -1115,11 +1385,29 @@ function renderRepair(stage) {
     thicken: "体素膨胀补厚薄壁",
   };
   const has = (a) => S.repairActions.includes(a);
-  const row = (a) => `<label class="check-row ${has(a) ? "on" : ""}" data-act="${a}">
+  const plan = S.repairPlan;
+  const planReasons = plan?.reasons || {};
+  const row = (a) => `<label class="check-row ${has(a) ? "on" : ""} ${planReasons[a] ? "recommended" : ""}" data-act="${a}">
       <input type="checkbox" ${has(a) ? "checked" : ""}>
-      <span>${ACT_LABEL[a]}</span><small>${hints[a]}</small>
+      <span>${ACT_LABEL[a]}${planReasons[a] ? ` <em class="plan-badge">推荐</em>` : ""}</span>
+      <small title="${esc(hints[a])}">${esc(planReasons[a] || hints[a])}</small>
     </label>`;
   const advSel = ADV.filter(has).length;
+  const planCard = plan ? `
+    <div class="block plan-card">
+      <div class="block-head">
+        <div><div class="block-title">智能推荐${plan.quality?.grade ? ` · 健康度 ${esc(plan.quality.grade)}` : ""}</div>
+          <div class="block-sub">${plan.has_analysis
+            ? (plan.actions.length ? `按最近一次检测报告勾选 ${plan.actions.length} 项，逐项写明原因` : "检测报告没有发现需要自动修复的问题")
+            : "尚无检测报告，先套用通用三步；运行检测后可获得针对性建议"}</div></div>
+      </div>
+      <div class="block-body">
+        ${(plan.warnings || []).map((w) => `<div class="rr-note warn">${esc(w)}</div>`).join("")}
+        ${plan.has_analysis && plan.resolved ? `<div class="rr-note ok">水密、法线、自交、碎屑与壁厚均未触发修复条件，可直接进入处理。</div>` : ""}
+        ${plan.has_analysis && !plan.actions.length && !plan.resolved ? `<div class="rr-note dim">没有可自动执行的动作，请先处理上方警告或手动选择。</div>` : ""}
+        ${Object.entries(planReasons).map(([a, why]) => `<div class="rr-row dim"><b>${esc(ACT_LABEL[a] || a)}</b>：${esc(why)}</div>`).join("")}
+      </div>
+    </div>` : "";
   const lr = S.lastRepair;
   const resultCard = lr ? `
     <div class="block repair-result">
@@ -1138,11 +1426,12 @@ function renderRepair(stage) {
   stage.innerHTML = `
     ${guideOf("repair")}
     ${resultCard}
+    ${planCard}
     <div class="block">
       <div class="block-head">
         <div><div class="block-title">修复动作</div>
           <div class="block-sub">核心三步通常全选；进阶项按需展开</div></div>
-        <button class="ghost small" id="btn-repair-rec" title="选中合并顶点 / 补洞 / 统一法线">一键推荐</button>
+        <button class="ghost small" id="btn-repair-rec" title="读取最近一次检测报告，只勾选真正需要的动作">智能推荐</button>
       </div>
       <div class="block-body">
         <div class="repair-group">
@@ -1213,7 +1502,24 @@ function renderRepair(stage) {
     updateParams();
   });
   const rec = $("#btn-repair-rec");
-  if (rec) rec.onclick = () => { S.repairActions = [...CORE]; render(); };
+  if (rec) rec.onclick = async () => {
+    if (!S.pid) return toast("先导入模型", "warn");
+    rec.disabled = true;
+    try {
+      const plan = await api(`/api/projects/${S.pid}/repair-plan`);
+      S.repairPlan = plan;
+      S.repairActions = plan.has_analysis ? [...(plan.actions || [])] : [...CORE];
+      if (plan.scale_factor) S.rescaleFactor = plan.scale_factor;
+      render();
+      if (!plan.has_analysis) toast("还没有检测报告，先套用通用三步；建议先运行检测", "warn");
+      else if (plan.actions?.length) toast(`已按检测报告勾选 ${plan.actions.length} 项修复`, "ok");
+      else if (plan.resolved) toast("检测未发现需要修复的问题", "ok");
+      else toast("没有可自动执行的动作，请查看待确认项", "warn");
+    } catch (e) {
+      rec.disabled = false;
+      toast("读取修复建议失败：" + e.message, "err");
+    }
+  };
   const clr = $("#btn-repair-clear");
   if (clr) clr.onclick = () => { S.lastRepair = null; render(); };
   $("#btn-repair").onclick = runRepair;
@@ -1338,6 +1644,24 @@ function renderProcess(stage) {
           <input type="number" id="p-scale" value="${p.scale}" step="0.05" min="0.05" max="20">
           <div class="field-help">整体等比缩放。也可用「目标高度」反算比例。</div>
         </div>
+        <div class="field-row">
+          <div class="field">
+            <div class="field-top"><span class="field-label">目标高度</span><span class="field-unit">mm</span></div>
+            <input type="number" id="p-target-h" value="${p.target_height || 0}" step="1" min="0" max="2000">
+            <div class="field-help">0 = 不用。填 180 会把模型缩放到总高 180mm，优先级高于缩放倍数。</div>
+          </div>
+          <div class="field">
+            <div class="field-top"><span class="field-label">目标最长边</span><span class="field-unit">mm</span></div>
+            <input type="number" id="p-target-max" value="${p.target_max_dim || 0}" step="1" min="0" max="2000">
+            <div class="field-help">0 = 不用。适合「不管朝向，整体不超过平台」。</div>
+          </div>
+        </div>
+        <div id="proc-preflight" class="field-help" style="margin-top:8px"></div>
+        <div class="row" style="margin-top:8px">
+          <button class="ghost small" id="btn-proc-preview">预检尺寸与用量</button>
+          <span class="dim" id="proc-preview-status" style="font-size:11px">不生成文件，只估算摆正后尺寸与材料用量</span>
+        </div>
+        <div id="proc-preview" class="proc-preview" hidden></div>
 
         <div class="row" style="margin-top:16px">
           <button class="primary" id="btn-proc">开始处理</button>
@@ -1360,6 +1684,147 @@ function renderProcess(stage) {
   bind("#p-supd", "support_diameter");
   bind("#p-sups", "support_spacing");
   bind("#p-scale", "scale");
+  bind("#p-target-h", "target_height");
+  bind("#p-target-max", "target_max_dim");
+  const updateProcPreflight = () => {
+    const box = $("#proc-preflight");
+    if (!box) return;
+    const st = S.project?.analysis?.stats || {};
+    const ext = Array.isArray(st.extents) && st.extents.length === 3 ? st.extents : null;
+    const build = S.printerDetail?.build;
+    const msgs = [];
+    if (S.proc.hollow && Number(S.proc.drain_holes) === 0) {
+      msgs.push("<span class='warn-text'>⚠ 已选镂空但没有排液孔：树脂会封在空腔里，建议至少 2 个。</span>");
+    }
+    if (Number(S.proc.target_height) > 0 && Number(S.proc.target_max_dim) > 0) {
+      msgs.push("<span class='dim'>目标高度优先于目标最长边；两者同时填时只按目标高度计算。</span>");
+    }
+    if (ext) {
+      const curMax = Math.max(...ext);
+      let factor = Number(S.proc.scale) || 1;
+      if (Number(S.proc.target_height) > 0 && ext[2] > 0) factor = Number(S.proc.target_height) / ext[2];
+      else if (Number(S.proc.target_max_dim) > 0 && curMax > 0) factor = Number(S.proc.target_max_dim) / curMax;
+      const scaled = ext.map((x) => x * factor).sort((a, b) => b - a);
+      if (build && build.length === 3) {
+        const bed = build.map(Number).sort((a, b) => b - a);
+        const over = scaled.map((x, i) => x > bed[i] + 0.01 ? `${x.toFixed(1)} > ${bed[i]}` : "").filter(Boolean);
+        if (over.length) {
+          msgs.push(`<span class='warn-text'>⚠ 缩放后 ${scaled.map((x) => x.toFixed(1)).join("×")}mm，超出 ${S.printerDetail.name || "当前机型"} 成型空间（${build.map((x) => Number(x).toFixed(0)).join("×")}mm）；可启用自动摆放或先分件。</span>`);
+        } else {
+          msgs.push(`<span class='ok-text'>✓ 缩放后 ${scaled.map((x) => x.toFixed(1)).join("×")}mm，可放入 ${S.printerDetail.name || "当前机型"}。</span>`);
+        }
+      } else {
+        msgs.push(`<span class='dim'>缩放后约 ${scaled.map((x) => x.toFixed(1)).join("×")}mm；选择机型后可检查成型空间。</span>`);
+      }
+    }
+    box.innerHTML = msgs.join("<br>");
+  };
+  ["#p-scale", "#p-target-h", "#p-target-max", "#p-drain", "#p-hollow"].forEach((sel) => {
+    const el = $(sel);
+    if (el) el.addEventListener("input", updateProcPreflight);
+    if (el) el.addEventListener("change", updateProcPreflight);
+  });
+  updateProcPreflight();
+
+  const procPreviewPayload = () => {
+    const out = { ...S.proc };
+    if (S.printerDetail?.build) out.build = S.printerDetail.build;
+    if (S.printerKey) out.printer_key = S.printerKey;
+    return out;
+  };
+  const procPreviewKey = () => JSON.stringify(procPreviewPayload());
+  const setPreviewStatus = (text, kind = "dim") => {
+    const el = $("#proc-preview-status");
+    if (!el) return;
+    el.textContent = text;
+    el.className = kind === "dim" ? "dim" : kind === "err" ? "warn-text" : "ok-text";
+    el.style.fontSize = "11px";
+  };
+  const renderProcPreview = (data, stale = false) => {
+    const box = $("#proc-preview");
+    if (!box || !data) return;
+    box.hidden = false;
+    const fit = data.fit;
+    const ext = (data.extents || []).map((x) => Number(x).toFixed(1)).join(" × ");
+    const factor = Number(data.scale?.factor || 1);
+    const targetText = data.scale?.target === "height" ? "目标高度"
+      : data.scale?.target === "max_dim" ? "目标最长边" : "缩放倍数";
+    const volume = Number(data.volume_cm3 || 0).toFixed(2);
+    const rows = [];
+    rows.push(`<div class="pp-main"><b>${ext} mm</b><span class="dim">摆正后 · ${targetText}${Math.abs(factor - 1) > 1e-6 ? ` ×${factor.toFixed(3)}` : ""}</span></div>`);
+    const usage = data.estimated_saved_pct != null
+      ? `实体 ${volume} cm³ → 镂空后约 ${(Number(data.estimated_shell_volume_mm3 || 0) / 1000).toFixed(2)} cm³，省料 <b>${data.estimated_saved_pct}%</b>`
+      : `实体体积 ${volume} cm³`;
+    rows.push(`<div class="pp-row">${usage} <span class="dim">（估算，未含支撑）</span></div>`);
+    if (!fit) {
+      rows.push(`<div class="pp-row dim">未选择机型，跳过成型空间检查。</div>`);
+    } else if (fit.ok) {
+      rows.push(`<div class="pp-row ok-text">✓ 可放入 ${esc(data.printer?.name || S.printerDetail?.name || "当前机型")}（含 ${fit.margin_mm}mm 取件余量）</div>`);
+    } else {
+      const over = (fit.oversize || []).map((o) => `${o.need.toFixed(1)} > ${o.have.toFixed(1)}`).join("、");
+      rows.push(`<div class="pp-row warn-text">✗ 超出成型空间：${over} mm</div>`);
+      if (fit.scale_to_fit && fit.scale_to_fit < 1) {
+        rows.push(`<div class="pp-row"><button class="ghost small" data-apply-fit="${fit.scale_to_fit}">按 ×${Number(fit.scale_to_fit).toFixed(3)} 缩放到可打印</button></div>`);
+      }
+    }
+    for (const w of data.warnings || []) rows.push(`<div class="pp-row dim">· ${esc(w)}</div>`);
+    for (const e of data.errors || []) rows.push(`<div class="pp-row warn-text">✗ ${esc(e)}</div>`);
+    if (stale) rows.push(`<div class="pp-row dim">参数已修改，当前结果来自上一次预检。</div>`);
+    box.innerHTML = rows.join("");
+    const apply = $("[data-apply-fit]", box);
+    if (apply) apply.onclick = () => {
+      S.proc.scale = Number(apply.dataset.applyFit) || 1;
+      S.proc.target_height = 0;
+      S.proc.target_max_dim = 0;
+      render();
+    };
+  };
+  const runProcPreview = async (force = false) => {
+    if (!S.pid || S.procPreviewBusy) return;
+    const key = procPreviewKey();
+    if (!force && S.procPreview?.pid === S.pid && S.procPreview.key === key) {
+      renderProcPreview(S.procPreview.data, false);
+      setPreviewStatus("预检完成 · 轻量估算，不生成文件", "ok");
+      return;
+    }
+    S.procPreviewBusy = true;
+    const btn = $("#btn-proc-preview");
+    if (btn) btn.disabled = true;
+    setPreviewStatus("预检中…（加载模型 + 摆正，不生成文件）");
+    try {
+      const data = await api(`/api/projects/${S.pid}/process-preview`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(procPreviewPayload()),
+      });
+      S.procPreview = { pid: S.pid, key, data };
+      renderProcPreview(data, false);
+      setPreviewStatus(
+        data.errors?.length ? "预检发现问题，请先处理" : "预检完成 · 轻量估算，不生成文件",
+        data.errors?.length ? "err" : "ok",
+      );
+    } catch (e) {
+      setPreviewStatus("预检失败：" + e.message, "err");
+    } finally {
+      S.procPreviewBusy = false;
+      if (btn) btn.disabled = false;
+    }
+  };
+  const markPreviewStale = () => {
+    if (!S.procPreview || S.procPreview.pid !== S.pid) return;
+    if (S.procPreview.key !== procPreviewKey()) setPreviewStatus("参数已修改，点「预检尺寸与用量」刷新");
+  };
+  $$("input, select", stage).forEach((el) => {
+    el.addEventListener("input", markPreviewStale);
+    el.addEventListener("change", markPreviewStale);
+  });
+  $("#btn-proc-preview").onclick = () => runProcPreview(true);
+  if (S.procPreview?.pid === S.pid) {
+    renderProcPreview(S.procPreview.data, S.procPreview.key !== procPreviewKey());
+    if (S.procPreview.key === procPreviewKey()) setPreviewStatus("预检完成 · 轻量估算，不生成文件", "ok");
+    else setPreviewStatus("参数已修改，点「预检尺寸与用量」刷新");
+  } else {
+    setTimeout(() => runProcPreview(false), 120);
+  }
   $("#p-sup").onchange = (e) => { S.proc.supports = e.target.value; };
   $("#p-hollow").onchange = (e) => { S.proc.hollow = e.target.checked; $("#row-hollow").classList.toggle("on", e.target.checked); };
   $("#p-orient").onchange = (e) => { S.proc.orient = e.target.checked; $("#row-orient").classList.toggle("on", e.target.checked); };
@@ -1817,6 +2282,8 @@ function renderAdvice(stage) {
     ${flowBar()}
     ${printerHero()}
     ${blockBanner(a)}
+    ${fallbackBanner(a)}
+    ${printabilityCard(a)}
     <div class="block">
       <div class="block-head"><div><div class="block-title">推荐结果 ${confBadge(a)}</div>
         <div class="block-sub">${a.summary}</div></div>
@@ -1929,6 +2396,51 @@ function blockBanner(a) {
   </div>`;
 }
 
+/**
+ * 输入被替换的提示。
+ * 机型 key 没命中预设、材料 key 不属于当前工艺、方案名不认识时，
+ * 后端会退回默认值并照常算出结果——数字自洽，但那不是用户选的东西。
+ * 不显示出来的话，用户会拿着 Ender-3 的参数去开自己的机器。
+ */
+function fallbackBanner(a) {
+  const f = a.fallbacks || {};
+  const items = [];
+  if (f.printer) items.push(`机型「${esc(f.printer)}」不在预设库里，已按 <b>${esc(a.printer_name || "")}</b> 计算`);
+  if (f.material) items.push(`材料「${esc(f.material)}」不属于 ${esc(a.process)} 工艺，已按当前材料表默认值计算`);
+  if (f.plan) items.push(`方案「${esc(f.plan)}」不存在，已回到「折中」`);
+  if (!items.length) return "";
+  return `<div class="block-banner soft">
+    <div class="bb-icon">!</div>
+    <div class="bb-body">
+      <b>输入被替换过，参数不是按你选的算的</b>
+      <span>${items.join("；")}。请重新选择后再生成一次。</span>
+    </div>
+  </div>`;
+}
+
+/** 一屏可打印性：阻断项 / 通过项 / 提醒数，先给结论再给细节 */
+function printabilityCard(a) {
+  const p = a.printability;
+  if (!p) return "";
+  const cls = p.status === "ready" ? "ok" : p.status === "caution" ? "warn" : "bad";
+  const rows = (p.checks || []).map((c) => {
+    const mark = c.ok === true ? "✓" : c.ok === false ? "✕" : "?";
+    const tone = c.ok === true ? "ok" : c.ok === false ? "bad" : "unknown";
+    return `<div class="pr-check ${tone}">
+      <span class="pr-mark">${mark}</span><b>${esc(c.label)}</b><span>${esc(c.detail)}</span>
+    </div>`;
+  }).join("");
+  const blockers = (p.blockers || []).map((b) => `<div>⚠ ${esc(b.text)}</div>`).join("");
+  return `<div class="printability ${cls}">
+    <div class="pr-head">
+      <span class="pr-badge">${esc(p.label)}</span>
+      <span class="dim" style="font-size:11px">${p.warning_count ? `${p.warning_count} 条风险提醒` : "无额外提醒"}</span>
+    </div>
+    <div class="pr-checks">${rows}</div>
+    ${blockers ? `<div class="pr-blockers">${blockers}</div>` : ""}
+  </div>`;
+}
+
 /** 置信度徽标：一眼看出这份建议有多可信 */
 function confBadge(a) {
   const c = a.confidence;
@@ -2030,6 +2542,11 @@ function renderExport(stage) {
   const changed = p && p.current !== p.original;
   stage.innerHTML = `
     ${guideOf("export")}
+    <div class="block">
+      <div class="block-head"><div class="block-title">当前模型</div>
+        <div class="block-sub">拖动旋转；挖孔 / 装配预览都在这个视图上操作</div></div>
+      <div class="block-body"><div class="viewer-wrap" id="export-view" style="height:300px"></div></div>
+    </div>
     ${changed ? `<div class="block">
       <div class="block-head"><div class="block-title">处理前后对比</div>
         <div class="block-sub">左边是刚导入的样子，右边是当前版本，拖动可旋转</div></div>
@@ -2095,9 +2612,14 @@ function renderExport(stage) {
         <div class="block-sub" id="print-stat">还没记录过</div></div>
       <div class="block-body">
         <div class="row">
+          <input type="number" id="print-duration" min="0" step="1" placeholder="耗时 min"
+                 style="width:100px" title="这次打印的实际耗时（分钟）">
+          <input type="text" id="print-material" placeholder="材料（可选）" style="width:120px">
+          <input type="text" id="print-note" placeholder="备注（可选，例如「支撑倒了」）" style="flex:1;max-width:280px">
+        </div>
+        <div class="row">
           <button class="ghost" data-print="success">打成功了</button>
           <button class="ghost" data-print="fail">打失败了</button>
-          <input type="text" id="print-note" placeholder="备注（可选，例如「支撑倒了」）" style="flex:1;max-width:280px">
         </div>
         <div id="print-list"></div>
       </div>
@@ -2112,7 +2634,7 @@ function renderExport(stage) {
             <select id="bool-other">
               <option value="">选择…</option>
               ${S.projects.filter((x) => x.id !== S.pid)
-                .map((x) => `<option value="${x.id}">${x.name}</option>`).join("")}
+                .map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join("")}
             </select>
           </div>
           <div class="field">
@@ -2256,18 +2778,22 @@ function renderExport(stage) {
         <div class="block-sub">${hist.length} 次 · 可回滚到任意一步</div></div>
       <div class="block-body">
         ${hist.length ? hist.map((h, i) => `<div class="metric-row">
-          <span><span class="mono dim">${h.at.slice(11, 19)}</span> &nbsp;${h.action}</span>
-          <span class="dim" style="font-size:10.5px;margin-left:auto;margin-right:10px">${h.note || ""}</span>
-          <button class="ghost" style="font-size:10px;padding:2px 8px" data-revert="${(p.history || []).length - 1 - i}">回到这版</button>
+          <span><span class="mono dim">${esc(String(h.at || "").slice(11, 19))}</span> &nbsp;${esc(h.action || "")}</span>
+          <span class="dim" style="font-size:10.5px;margin-left:auto;margin-right:10px">${esc(h.note || "")}</span>
+          ${h.out_removed
+            ? '<span class="dim" style="font-size:10px">文件已清理</span>'
+            : `<button class="ghost" style="font-size:10px;padding:2px 8px" data-revert="${(p.history || []).length - 1 - i}">回到这版</button>`}
         </div>`).join("")
         : '<div class="queue-empty">还没有操作记录</div>'}
         ${hist.length ? `<div class="row" style="margin-top:10px">
           <button class="ghost" id="btn-undo">撤销（Ctrl+Z）</button>
           <button class="ghost" id="btn-redo">重做（Ctrl+Y）</button>
-          <button class="ghost" data-revert="-1">回到导入时</button></div>` : ""}
+          <button class="ghost" data-revert="-1">回到导入时</button>
+          <button class="ghost" id="btn-clean-hist" title="只删中间文件，操作记录会保留">清理旧版本文件</button></div>` : ""}
       </div>
     </div>`;
 
+  mountViewer("export-view", "current");
   if (changed) {
     mountViewer("view-orig", "original");
     mountViewer("view-now", "current");
@@ -2314,7 +2840,7 @@ function renderExport(stage) {
     } catch (err) { toast("间隙检查失败：" + err.message, "err"); }
   };
   if ($("#btn-assembly")) $("#btn-assembly").onclick = async (e) => {
-    const v = S.viewers.find((x) => x.el.id === "view-orig") || S.viewers.find((x) => x.el.id === "viewer");
+    const v = S.viewers.find((x) => x.el.id === "export-view") || S.viewers.find((x) => x.el.id === "viewer");
     if (!v) return toast("预览还没准备好", "warn");
     try {
       const d = await api(`/api/projects/${S.pid}/assembly`);
@@ -2337,6 +2863,18 @@ function renderExport(stage) {
   if ($("#btn-param-hist")) $("#btn-param-hist").onclick = loadParamHistory;
   if ($("#btn-undo")) $("#btn-undo").onclick = undoStep;
   if ($("#btn-redo")) $("#btn-redo").onclick = redoStep;
+  if ($("#btn-clean-hist")) $("#btn-clean-hist").onclick = async (e) => {
+    e.target.disabled = true;
+    try {
+      const r = await api(`/api/projects/${S.pid}/history/cleanup?keep=3`, { method: "POST" });
+      S.project = await api(`/api/projects/${S.pid}`);
+      await loadProjects();
+      render();
+      toast(r.removed
+        ? `已清理 ${r.removed} 个旧版本，释放 ${(r.freed_bytes / 1048576).toFixed(1)} MB`
+        : "没有可清理的旧版本");
+    } catch (err) { toast("清理失败：" + err.message, "err"); e.target.disabled = false; }
+  };
   if ($("#cut-pos")) $("#cut-pos").oninput = (e) => {
     $("#cut-pos-label").textContent = `${e.target.value}%`;
   };
@@ -2359,7 +2897,7 @@ function renderExport(stage) {
     } catch (e) { toast("切割失败：" + e.message, "err"); }
   };
   if ($("#btn-bore-pick")) $("#btn-bore-pick").onclick = (e) => {
-    const v = S.viewers.find((x) => x.el.id === "viewer");
+    const v = S.viewers.find((x) => x.el.id === "export-view");
     if (!v) return toast("预览还没准备好", "warn");
     if (v.pickMode) {
       v.disablePick();
@@ -2388,7 +2926,7 @@ function renderExport(stage) {
       });
       toast(`挖了 ${r.holes} 个孔，体积 ${(r.volume_mm3 / 1000).toFixed(2)}cm³`);
       S.borePoints = [];
-      const v = S.viewers.find((x) => x.el.id === "viewer");
+      const v = S.viewers.find((x) => x.el.id === "export-view");
       if (v) v.clearMarkers();
       S.project = await api(`/api/projects/${S.pid}`);
       await loadProjects();
@@ -2397,7 +2935,7 @@ function renderExport(stage) {
   };
   if ($("#btn-bore-clear")) $("#btn-bore-clear").onclick = () => {
     S.borePoints = [];
-    const v = S.viewers.find((x) => x.el.id === "viewer");
+    const v = S.viewers.find((x) => x.el.id === "export-view");
     if (v) v.clearMarkers();
     if ($("#btn-bore-pick")) $("#btn-bore-pick").textContent = "点选孔位（0）";
     toast("已清空孔位");
@@ -2416,11 +2954,18 @@ function renderExport(stage) {
   loadQueue();
   $$("[data-print]", stage).forEach((el) => el.onclick = async () => {
     try {
+      const dur = $("#print-duration")?.value;
       const r = await api(`/api/projects/${S.pid}/print-record`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ result: el.dataset.print, note: $("#print-note")?.value || "" }),
+        body: JSON.stringify({
+          result: el.dataset.print,
+          note: $("#print-note")?.value || "",
+          duration_min: dur === "" || dur == null ? null : Number(dur),
+          material: $("#print-material")?.value || "",
+        }),
       });
       if ($("#print-note")) $("#print-note").value = "";
+      if ($("#print-duration")) $("#print-duration").value = "";
       renderPrintList(r);
       toast(`已记录：成功 ${r.success}/${r.total}（${r.rate}%）`);
     } catch (e) { toast("记录失败：" + e.message, "err"); }
@@ -2587,9 +3132,9 @@ function showErrorCard(job) {
   const card = document.createElement("div");
   card.className = "error-card";
   card.innerHTML = `
-    <div class="ec-head"><span class="ec-dot"></span><b>${job.title} 失败</b>
-      <span class="ec-trace dim mono">trace ${job.id}</span></div>
-    <div class="ec-detail">${err}</div>
+    <div class="ec-head"><span class="ec-dot"></span><b>${esc(job.title)} 失败</b>
+      <span class="ec-trace dim mono">trace ${esc(job.id)}</span></div>
+    <div class="ec-detail">${esc(err)}</div>
     <div class="ec-actions">${tips.map((t, i) => `<button class="ghost" data-tip="${i}">${t.label}</button>`).join("")}</div>`;
   stage.prepend(card);
   $$("[data-tip]", card).forEach((b) => b.onclick = () => {
@@ -2618,7 +3163,8 @@ async function loadProjects() {
 }
 
 async function loadProject(pid) {
-  if (S.pid !== pid) { S.lastRepair = null; S.lastProcess = null; }  // 换模型不要沿用上一个模型的结果
+  const switching = S.pid !== pid;
+  if (switching) { S.lastRepair = null; S.lastProcess = null; S.repairPlan = null; }  // 换模型不要沿用上一个模型的结果
   S.pid = pid;
   const p = await api(`/api/projects/${pid}`);
   S.project = p;
@@ -2628,7 +3174,8 @@ async function loadProject(pid) {
   // 这个项目上次用的是哪台机器
   const remembered = recallPrinter(pid);
   if (remembered) S.printerKey = remembered;
-  S.step = S.analysis ? 1 : 1;
+  // 同一项目刷新（任务完成/回滚）时保留当前步骤；换项目才回到检测页
+  if (switching) S.step = 1;
   // 机型变了就同步材料清单（树脂/线材不通用）
   await loadPrinterDetail(S.printerKey);
   await loadMaterials(S.printerDetail?.process || S.printerProcess, S.materialKey);
@@ -2648,13 +3195,20 @@ async function uploadFiles(files) {
   for (const f of files) fd.append("files", f);
   toast(`正在导入 ${files.length} 个文件…`);
   try {
-    const r = await api("/api/upload", { method: "POST", body: fd });
+    const r = await api("/api/upload?dedupe=1", { method: "POST", body: fd });
+    for (const e of r.errors || []) toast(`${e.name}：${e.error}`, "err");
+    for (const d of r.duplicates || []) toast(`「${d.name}」已存在，已跳到原项目`, "warn");
     await loadProjects();
     const first = r.projects[0];
+    const dup = (r.duplicates || [])[0]?.project;
     if (first) {
-      toast(`已导入 ${first.name}`);
+      toast(r.projects.length > 1 ? `已导入 ${r.projects.length} 个模型` : `已导入 ${first.name}`);
       await loadProject(first.id);
       if (files.length === 1) runAnalyze();
+    } else if (dup) {
+      await loadProject(dup.id);
+    } else if (!(r.errors || []).length) {
+      toast("没有可导入的文件", "warn");
     }
   } catch (e) {
     toast("导入失败：" + e.message, "err");
@@ -2724,9 +3278,13 @@ function refreshAfterJob(j) {
 }
 
 async function runAnalyze() {
+  const quick = S.scanMode === "quick";
   try {
     const r = await api(`/api/projects/${S.pid}/analyze`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(quick
+        ? { sample_faces: 500, check_self_intersection: false }
+        : { sample_faces: 1500, check_self_intersection: true }),
     });
     startJob(r, afterAnalyze);
   } catch (e) { toast("检测启动失败：" + e.message, "err"); }
@@ -2736,6 +3294,7 @@ async function afterAnalyze(j) {
   const p = await api(`/api/projects/${S.pid}`);
   S.project = p;
   S.analysis = p.analysis;
+  S.repairPlan = null;  // 检测更新后旧建议失效
   await loadProjects();
   renderSteps(); render();
   bindHelp();
@@ -2780,6 +3339,7 @@ async function runRepair() {
 async function afterRepair(j) {
   const p = await api(`/api/projects/${S.pid}`);
   S.project = p;
+  S.repairPlan = null;  // 修复后网格变了，旧建议不再适用
   S.advice = null; // 修复后几何变了，旧建议作废，去建议页会按新几何重新生成
   await loadProjects();
   const b = j.result?.before, a = j.result?.after;
@@ -3232,14 +3792,22 @@ async function loadQueue() {
   const list = $("#queue-list");
   const stat = $("#queue-stat");
   if (!list) return;
+  const pruneBtn = $("#btn-queue-prune");
+  if (pruneBtn) pruneBtn.onclick = async () => {
+    try {
+      const r = await api("/api/queue/prune", { method: "POST" });
+      toast(r.removed ? `已清理 ${r.removed} 个失效项` : "没有失效项");
+      loadQueue();
+    } catch (e) { toast("清理失败：" + e.message, "err"); }
+  };
   try {
     const d = await api("/api/queue");
     const items = d.items || [];
     stat.textContent = items.length ? `${items.length} 件待打` : "空队列";
     if (!items.length) { list.innerHTML = '<div class="queue-empty">队列为空</div>'; return; }
     list.innerHTML = items.map((q, i) => `<div class="metric-row">
-      <span>${i + 1}. ${q.name}${q.exists ? "" : ' <span class="pill bad">已删除</span>'}</span>
-      <span class="dim" style="font-size:10.5px;margin-left:auto;margin-right:8px">${q.note || ""}</span>
+      <span>${i + 1}. ${esc(q.name || "")}${q.exists ? "" : ' <span class="pill bad">已删除</span>'}</span>
+      <span class="dim" style="font-size:10.5px;margin-left:auto;margin-right:8px">${esc(q.note || "")}</span>
       <span class="row-ops" style="opacity:1">
         ${i > 0 ? `<button data-qmove="${i}:-1" title="上移">↑</button>` : ""}
         ${i < items.length - 1 ? `<button data-qmove="${i}:1" title="下移">↓</button>` : ""}
@@ -3278,14 +3846,18 @@ function renderPrintList(d) {
   if (!stat || !list) return;
   const rows = d.prints || [];
   stat.textContent = rows.length
-    ? `共 ${d.total} 次，成功 ${d.success} 次（${d.rate}%）`
+    ? `共 ${d.total} 次，成功 ${d.success} 次（${d.rate}%）${d.total_minutes ? `，累计 ${Math.round(d.total_minutes)} 分钟` : ""}`
     : "还没记录过";
   if (!rows.length) { list.innerHTML = ""; return; }
-  list.innerHTML = rows.slice().reverse().map((r) => `<div class="metric-row">
+  list.innerHTML = rows.slice().reverse().map((r) => {
+    const meta = [r.material, r.printer, r.duration_min ? `${r.duration_min} 分钟` : ""].filter(Boolean).join(" · ");
+    return `<div class="metric-row">
     <span>${r.result === "success" ? '<span class="pill good">成功</span>' : '<span class="pill bad">失败</span>'}
-      <span class="mono dim" style="font-size:10px;margin-left:6px">${r.at.slice(5, 16).replace("T", " ")}</span></span>
-    <b class="dim" style="font-size:10.5px">${r.note || ""}</b>
-  </div>`).join("");
+      <span class="mono dim" style="font-size:10px;margin-left:6px">${esc(String(r.at || "").slice(5, 16).replace("T", " "))}</span></span>
+    ${meta ? `<span class="dim" style="font-size:10.5px">${esc(meta)}</span>` : ""}
+    <b class="dim" style="font-size:10.5px">${esc(r.note || "")}</b>
+  </div>`;
+  }).join("");
 }
 
 function packPlan(res) {
@@ -3389,18 +3961,23 @@ async function refreshQueue() {
   box.innerHTML = jobs.slice(0, 12).map((j) => `
     <div class="job-card">
       <div class="job-top">
-        <span class="job-title">${j.title}</span>
-        <span class="job-state st-${j.status}">${statusText(j.status)}</span>
+        <span class="job-title" ${j.project_id ? `data-jopen="${esc(j.project_id)}" style="cursor:pointer" title="打开项目"` : ""}>${esc(j.title)}</span>
+        <span class="job-state st-${esc(j.status)}">${j.interrupted ? "已中断" : statusText(j.status)}</span>
       </div>
-      <div class="job-bar"><i style="width:${j.percent}%"></i></div>
-      <div class="job-msg">${j.message || j.stage || ""}</div>
+      <div class="job-bar"><i style="width:${Number(j.percent) || 0}%"></i></div>
+      <div class="job-msg">${esc(j.message || j.stage || "")}</div>
       <div class="job-ops">
-        ${j.status === "running" || j.status === "paused"
-          ? `<button data-jcmd="pause" data-jid="${j.id}">${j.status === "paused" ? "恢复" : "暂停"}</button>` : ""}
-        ${["failed", "cancelled"].includes(j.status) ? `<button data-jcmd="resume" data-jid="${j.id}">断点续跑</button>` : ""}
-        ${["running", "paused", "queued"].includes(j.status) ? `<button data-jcmd="cancel" data-jid="${j.id}">中断</button>` : ""}
+        ${(j.status === "running" || j.status === "paused") && !j.interrupted
+          ? `<button data-jcmd="pause" data-jid="${esc(j.id)}">${j.status === "paused" ? "恢复" : "暂停"}</button>` : ""}
+        ${["failed", "cancelled"].includes(j.status) && !j.interrupted ? `<button data-jcmd="resume" data-jid="${esc(j.id)}">断点续跑</button>` : ""}
+        ${["running", "paused", "queued"].includes(j.status) && !j.interrupted ? `<button data-jcmd="cancel" data-jid="${esc(j.id)}">中断</button>` : ""}
       </div>
     </div>`).join("");
+
+  $$("[data-jopen]", box).forEach((el) => el.onclick = () => {
+    if (S.pid === el.dataset.jopen) { S.step = 1; renderSteps(); render(); return; }
+    loadProject(el.dataset.jopen).catch((e) => toast(e.message, "err"));
+  });
 
   $$("[data-jcmd]", box).forEach((b) => b.onclick = async () => {
     const cmd = b.dataset.jcmd === "pause" && b.textContent === "恢复" ? "resume" : b.dataset.jcmd;
@@ -3469,10 +4046,25 @@ function bindDrop() {
   window.addEventListener("dragleave", () => { if (--depth <= 0) { depth = 0; veil.classList.remove("on"); } });
   window.addEventListener("drop", (e) => {
     e.preventDefault(); depth = 0; veil.classList.remove("on");
-    if (e.dataTransfer?.files?.length) uploadFiles([...e.dataTransfer.files]);
+    if (e.dataTransfer?.files?.length) pickFiles([...e.dataTransfer.files]);
   });
-  $("#file-input").onchange = (e) => { uploadFiles([...e.target.files]); e.target.value = ""; };
+  $("#file-input").onchange = (e) => { pickFiles([...e.target.files]); e.target.value = ""; };
   $("#btn-pick")?.addEventListener("click", () => $("#file-input").click());
+
+  function pickFiles(files) {
+    const okExt = new Set(["stl", "obj", "ply", "3mf", "off", "glb", "gltf"]);
+    const good = [], bad = [];
+    const limit = 512 * 1024 * 1024;
+    for (const f of files) {
+      const ext = (f.name.split(".").pop() || "").toLowerCase();
+      if (!okExt.has(ext)) bad.push(`${f.name}（不支持 ${ext || "无扩展名"}）`);
+      else if (f.size === 0) bad.push(`${f.name}（空文件）`);
+      else if (f.size > limit) bad.push(`${f.name}（超过 512MB）`);
+      else good.push(f);
+    }
+    if (bad.length) toast(`已跳过 ${bad.length} 个文件：${bad.slice(0, 2).join("；")}`, "warn");
+    if (good.length) uploadFiles(good);
+  }
 }
 
 function bindHelp() {
@@ -3487,7 +4079,21 @@ async function boot() {
   await loadMaterials(S.printerDetail?.process || S.printerProcess);
   await loadProjects();
   renderSteps();
-  render();
+  // 支持 #p=<id>&s=<step> 深链：刷新、书签、从任务通知打开都能回到原处
+  const target = hashTarget();
+  if (target.pid && S.projects.some((p) => p.id === target.pid)) {
+    try {
+      await loadProject(target.pid);
+      if (target.step != null && target.step !== S.step) {
+        S.step = target.step; renderSteps(); render();
+      }
+    } catch {
+      toast("链接里的项目已不存在", "warn");
+      render();
+    }
+  } else {
+    render();
+  }
   bindDrop();
   bindHelp();
   $("#btn-pause").onclick = () => jobCmd(S.job?.status === "paused" ? "resume" : "pause");
@@ -3499,10 +4105,21 @@ async function boot() {
   // 空闲时 5s 足够，后台标签页直接停表。
   pollEvery(5000, refreshQueue);
   window.addEventListener("resize", () => (S.viewers || []).forEach((v) => v.resize()));
+  window.addEventListener("hashchange", async () => {
+    const t = hashTarget();
+    if (t.pid && t.pid !== S.pid && S.projects.some((p) => p.id === t.pid)) {
+      try { await loadProject(t.pid); } catch { /* 项目可能刚被删 */ }
+    }
+    if (t.step != null && t.step !== S.step) { S.step = t.step; renderSteps(); render(); }
+  });
   window.addEventListener("keydown", (e) => {
     const tag = (e.target.tagName || "").toLowerCase();
     if (tag === "input" || tag === "select" || tag === "textarea") return;
     if (e.key === "?") { e.preventDefault(); showShortcuts(); return; }
+    // 数字键 1–6 直达步骤；输入框里不触发（上面已排除 input/select/textarea）
+    if (/^[1-6]$/.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault(); goto(Number(e.key) - 1); return;
+    }
     // 建议页按 P 直接换机型，省得去点按钮
     if ((e.key === "p" || e.key === "P") && S.step === 4 && !e.ctrlKey && !e.metaKey) {
       e.preventDefault(); openPrinterPicker(); return;

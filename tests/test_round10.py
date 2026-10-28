@@ -142,7 +142,7 @@ def test_bore_rejects_zero_diameter(cube):
 
     with TestClient(app) as c:
         assert c.post(f"/api/projects/{cube['id']}/bore",
-                      json={"points": [[0, 0, 20]], "diameter": 0}).status_code == 400
+                      json={"points": [[0, 0, 20]], "diameter": 0}).status_code == 422
 
 
 # ---------------------------------------------------------------- 支撑去重

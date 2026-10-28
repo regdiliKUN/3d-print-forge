@@ -453,6 +453,133 @@ def run() -> Gate:
             len(pl) == 1 and len(sk) == 1 and sk[0].get("rotate_fits") is True,
             {"placed": len(pl), "skipped": sk})
 
+    # ---- 第 62~78 轮：状态一致性 / 文件完整性 / 建议可信度
+    import tempfile
+
+    from app import advisor, calibration, meshio, store
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="gate_"))
+    box = trimesh.creation.box(extents=[10, 20, 30])
+    stl = tmpdir / "box.stl"
+    box.export(str(stl))
+    raw = stl.read_bytes()
+
+    half = tmpdir / "half.stl"
+    half.write_bytes(raw[: len(raw) // 2])
+    try:
+        meshio.load_mesh(half)
+        trunc_raised = False
+    except ValueError:
+        trunc_raised = True
+    g.check("truncated_stl_rejected", trunc_raised,
+            {"raised": trunc_raised, "declared": meshio.probe_stl(half)["declared_faces"]})
+
+    tail = tmpdir / "tail.stl"
+    tail.write_bytes(raw + b"\0" * 20)
+    g.check("trailing_bytes_still_binary",
+            len(meshio.load_mesh(tail).faces) == 12,
+            {"faces": len(meshio.load_mesh(tail).faces)})
+
+    # 几何变更后旧报告必须失效，且建议层按当前文件重算
+    proj = store.create("g.stl", stl)
+    store.update(proj["id"], analysis={
+        "stats": {"extents": [10, 20, 30], "volume_mm3": 6000, "area_mm2": 2200,
+                  "faces": 12, "is_watertight": True},
+        "items": [{"id": "thickness", "value": {"min": 2.0}}],
+        "summary": {"total": 7, "worst": "ok"},
+    })
+    big = tmpdir / "big.stl"
+    bm = meshio.load_mesh(stl, mutable=True)
+    bm.apply_scale(3.0)
+    bm.export(str(big))
+    store.add_history(proj["id"], "resize", {"width": 30}, big)
+    rec = store.get(proj["id"])
+    geo = advisor._geometry(rec)
+    g.check("stale_analysis_recomputed",
+            rec.get("analysis_stale") is True and abs(geo["volume_mm3"] - 162000) < 1e-3
+            and geo.get("stale") is True,
+            {"stale_flag": rec.get("analysis_stale"), "volume": geo["volume_mm3"]})
+
+    # save() 只写回改过的字段，不能把并发更新抹掉
+    store.update(proj["id"], tags=["keep"], favorite=True)
+    stale_copy = store.get(proj["id"])
+    store.update(proj["id"], tags=["newer"])
+    stale_copy["name"] = "renamed.stl"
+    store.save(stale_copy)
+    after = store.get(proj["id"])
+    g.check("save_merges_only_changed_fields",
+            after["tags"] == ["newer"] and after["favorite"] is True
+            and after["name"] == "renamed.stl",
+            {"tags": after["tags"], "favorite": after["favorite"], "name": after["name"]})
+
+    # 损坏的记录要出现在列表里，而不是消失
+    bad = tmpdir / "bad.json"
+    bad.write_text("{oops", encoding="utf-8")
+    old_projects = store.config.PROJECTS
+    try:
+        store.config.PROJECTS = tmpdir
+        listed = {x["id"]: x for x in store.list_all()}
+    finally:
+        store.config.PROJECTS = old_projects
+    g.check("damaged_record_visible",
+            listed.get("bad", {}).get("damaged") is True,
+            {"ids": sorted(listed)})
+
+    # issues 必须是「有问题的项数」，不是检测项总数
+    rep = {"items": [{"severity": "ok"}, {"severity": "warning"}, {"severity": "error"}],
+           "summary": {"total": 7}}
+    g.check("issue_count_is_not_check_count",
+            store._issue_count(rep) == 2,
+            {"issues": store._issue_count(rep)})
+
+    # 支撑未判定时不能输出「自支撑良好」
+    ghost = {"id": "ghost", "name": "g.stl", "current": str(tmpdir / "missing.stl"),
+             "source": str(tmpdir / "missing.stl"),
+             "analysis": {"stats": {"extents": [50, 40, 30], "volume_mm3": 60000,
+                                    "area_mm2": 8000, "faces": 5000, "is_watertight": True},
+                          "items": [{"id": "thickness", "value": {"min": 1.8}}]}}
+    adv = advisor.recommend(ghost, {"process": "FDM", "printer": "bambu_a1"})
+    sup_p = next(p for p in adv["params"] if p["key"] == "supports")
+    g.check("support_unassessed_is_not_safe",
+            sup_p["value"] == "未评估" and adv["confidence"]["score"] < 0.5,
+            {"value": sup_p["value"], "confidence": adv["confidence"]["score"]})
+
+    # 机型/材料被替换必须留痕
+    adv2 = advisor.recommend(ghost, {"process": "FDM", "printer": "no_such",
+                                     "material": "standard"})
+    g.check("input_fallback_is_reported",
+            adv2["fallbacks"]["printer"] == "no_such"
+            and adv2["fallbacks"]["material"] == "standard"
+            and any("没有机型预设" in w for w in adv2["warnings"]),
+            {"fallbacks": adv2["fallbacks"]})
+
+    # calibrate 传字符串 "false" 必须真的关掉
+    adv3 = advisor.recommend(ghost, {"process": "FDM", "printer": "bambu_a1",
+                                     "calibrate": "false"})
+    g.check("calibrate_string_false_honored",
+            adv3["calibration"]["applied"] is False,
+            {"applied": adv3["calibration"]["applied"]})
+
+    # 标定来源标签必须和算法一致（没做池化就不能叫 global）
+    cal = calibration.estimate("FDM", "bambu_a1", "PLA", "hours")
+    g.check("calibration_source_label_honest",
+            cal["source"] in ("group", "sparse", "prior"),
+            {"source": cal["source"], "n": cal["n"]})
+
+    # 报告要能显示未确认项
+    html = __import__("app.main", fromlist=["main"])._build_report_html({
+        "id": "r", "name": "r.stl", "history": [],
+        "analysis": {"stats": {"faces": 10}, "items": [], "summary": {"counts": {"error": 0}},
+                     "failed_checks": ["self_intersection"],
+                     "quality": {"score": 80, "grade": "C", "verdict": "x", "parts": [],
+                                 "caveats": ["壁厚只采样了 0.3%"]}},
+        "advice": {"params": [], "warnings": [],
+                   "confidence": {"grade": "中", "score": 0.6, "reasons": ["a"]}},
+    })
+    g.check("report_shows_unconfirmed",
+            "未确认项" in html and "这项检测没有完成" in html and "置信度" in html,
+            {"len": len(html)})
+
     g.elapsed = round(time.time() - t0, 3)
     return g
 
