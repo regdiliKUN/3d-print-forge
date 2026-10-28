@@ -1,0 +1,79 @@
+{
+ "aecbb4fd82d8": {
+  "id": "aecbb4fd82d8",
+  "kind": "repair",
+  "title": "修复 示例模型（破洞 / 薄壁 / 碎屑）",
+  "project_id": "3a3126006ba2",
+  "status": "done",
+  "progress": 1.0,
+  "percent": 100.0,
+  "stage": "完成",
+  "message": "处理完成",
+  "created": "2026-10-22T19:35:20+00:00",
+  "started": "2026-10-22T19:35:20+00:00",
+  "finished": "2026-10-22T19:35:21+00:00",
+  "error": null,
+  "eta": null,
+  "steps": {
+   "fill_holes": {
+    "status": "done",
+    "at": "2026-10-22T19:35:20+00:00"
+   }
+  },
+  "waiting_resource": false
+ },
+ "de19b6eafc14": {
+  "id": "de19b6eafc14",
+  "kind": "t",
+  "title": "j1",
+  "project_id": null,
+  "status": "done",
+  "progress": 1.0,
+  "percent": 100.0,
+  "stage": "完成",
+  "message": "处理完成",
+  "created": "2026-10-22T19:35:20+00:00",
+  "started": "2026-10-22T19:35:20+00:00",
+  "finished": "2026-10-22T19:35:21+00:00",
+  "error": null,
+  "eta": null,
+  "steps": {},
+  "waiting_resource": false
+ },
+ "0898712e1e0b": {
+  "id": "0898712e1e0b",
+  "kind": "t",
+  "title": "j2",
+  "project_id": null,
+  "status": "done",
+  "progress": 1.0,
+  "percent": 100.0,
+  "stage": "完成",
+  "message": "处理完成",
+  "created": "2026-10-22T19:35:20+00:00",
+  "started": "2026-10-22T19:35:20+00:00",
+  "finished": "2026-10-22T19:35:20+00:00",
+  "error": null,
+  "eta": null,
+  "steps": {},
+  "waiting_resource": false
+ },
+ "c3b896dd6667": {
+  "id": "c3b896dd6667",
+  "kind": "process",
+  "title": "处理 示例模型（破洞 / 薄壁 / 碎屑）",
+  "project_id": "54fa5c007f89",
+  "status": "done",
+  "progress": 1.0,
+  "percent": 100.0,
+  "stage": "完成",
+  "message": "处理完成",
+  "created": "2026-10-22T19:35:24+00:00",
+  "started": "2026-10-22T19:35:24+00:00",
+  "finished": "2026-10-22T19:35:25+00:00",
+  "error": null,
+  "eta": null,
+  "steps": {},
+  "waiting_resource": false
+ }
+}

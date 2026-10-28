@@ -1,0 +1,34 @@
+# 环境
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 运行时数据（模型、产出、状态、日志）
+data/
+!data/.gitkeep
+
+# 基准测试产物（模型集与结果，按需单独提交基线 JSON）
+bench/models/
+bench/tmp/
+bench/results/_*.log
+# 每次运行的产物：latest.json 与 bench-*.json 由 run.py 复生成，无需入库
+bench/results/latest.json
+bench/results/bench-*.json
+# 仅提交以下两个作为可追溯基线：
+#   bench/expected.json      —— 结果指纹回归基线（--save-expected 生成）
+#   bench/model_manifest.json —— 模型集几何清单
+*.npz
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+htmlcov/

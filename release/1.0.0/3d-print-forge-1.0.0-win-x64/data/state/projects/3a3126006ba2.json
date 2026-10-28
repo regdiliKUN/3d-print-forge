@@ -1,0 +1,264 @@
+{
+  "id": "3a3126006ba2",
+  "name": "示例模型（破洞 / 薄壁 / 碎屑）",
+  "created": "2026-10-22T19:35:20+00:00",
+  "updated": "2026-10-22T19:35:20+00:00",
+  "source": "I:\\PrinterApp\\data\\uploads\\demo_5f744ede.stl",
+  "original": "I:\\PrinterApp\\data\\uploads\\demo_5f744ede.stl",
+  "current": "I:\\PrinterApp\\data\\outputs\\3a3126006ba2_repaired_1792697720.stl",
+  "history": [
+    {
+      "at": "2026-10-22T19:35:20+00:00",
+      "action": "repair",
+      "params": {
+        "actions": [
+          "fill_holes"
+        ]
+      },
+      "out": "I:\\PrinterApp\\data\\outputs\\3a3126006ba2_repaired_1792697720.stl",
+      "note": "补洞"
+    }
+  ],
+  "analysis": {
+    "at": "2026-10-23T04:35:20",
+    "file": "3a3126006ba2_repaired_1792697720.stl",
+    "stats": {
+      "vertices": 661,
+      "faces": 1310,
+      "extents": [
+        56.6,
+        40.0,
+        42.25
+      ],
+      "max_dim": 56.6,
+      "volume_mm3": 33615.983,
+      "area_mm2": 6635.27,
+      "is_watertight": true,
+      "is_winding_consistent": true,
+      "euler_number": 6
+    },
+    "items": [
+      {
+        "id": "watertight",
+        "name": "水密性",
+        "severity": "ok",
+        "message": "所有边都被恰好两个面共享，模型闭合，可直接布尔运算与切片。",
+        "value": {
+          "boundary_edges": 0
+        },
+        "fix": null,
+        "details": {},
+        "elapsed": 0.002
+      },
+      {
+        "id": "normals",
+        "name": "法线方向",
+        "severity": "ok",
+        "message": "法线朝外且方向一致，有向体积为正。",
+        "value": {
+          "signed_volume": 33615.983,
+          "degenerate_faces": 0,
+          "components": 3,
+          "inverted_components": 0,
+          "winding_conflicts": 0,
+          "winding_consistent": true
+        },
+        "fix": null,
+        "details": {},
+        "elapsed": 0.005
+      },
+      {
+        "id": "thickness",
+        "name": "壁厚",
+        "severity": "warning",
+        "message": "最薄处 0.50mm（中位 1.17mm），偏薄，清洗和二次固化时容易压塌。",
+        "value": {
+          "samples": 16,
+          "sample_faces": 1310,
+          "min": 0.5,
+          "median": 1.17,
+          "p5": 0.5,
+          "max": 1.17,
+          "thin_ratio": 0.25,
+          "fail_ratio": 0.0,
+          "directions": 3,
+          "mode": "full"
+        },
+        "fix": {
+          "action": "thicken",
+          "label": "一键加厚到安全值"
+        },
+        "details": {},
+        "elapsed": 0.231
+      },
+      {
+        "id": "nonmanifold",
+        "name": "非流形边",
+        "severity": "ok",
+        "message": "没有一条边被超过两个面共享。",
+        "value": {
+          "count": 0
+        },
+        "fix": null,
+        "details": {},
+        "elapsed": 0.003
+      },
+      {
+        "id": "self_intersection",
+        "name": "自相交",
+        "severity": "ok",
+        "message": "未发现三角形互相穿插（检查 226099 组候选对）。",
+        "value": {
+          "count": 0,
+          "pairs": [],
+          "duplicates": 0,
+          "coplanar_overlaps": 0,
+          "sampled": false,
+          "candidate_pairs": 226099,
+          "tested_pairs": 6050,
+          "large_triangles": 12,
+          "tolerance": 5.659999847412109e-05,
+          "count_is_lower_bound": false,
+          "elapsed": 0.19
+        },
+        "fix": null,
+        "details": {},
+        "elapsed": 0.195
+      },
+      {
+        "id": "components",
+        "name": "孤立面片",
+        "severity": "warning",
+        "message": "模型由 3 个互不连通的部件组成，最大部件占 75.4% 表面积。 其中 1 个是碎屑（面积不足主件的 1%，或负体积但不在实体内），建议清理。",
+        "value": {
+          "components": 3,
+          "sizes": [
+            {
+              "id": 0,
+              "faces": 1286,
+              "area": 5002.630190970443,
+              "volume": 33222.25531804597,
+              "kind": "solid"
+            },
+            {
+              "id": 1,
+              "faces": 12,
+              "area": 1624.0,
+              "volume": 392.0,
+              "kind": "solid"
+            },
+            {
+              "id": 2,
+              "faces": 12,
+              "area": 8.639985809325594,
+              "volume": 1.7279957427975035,
+              "kind": "debris"
+            }
+          ],
+          "tiny": 1,
+          "cavities": 0,
+          "small_ratio": 0.01
+        },
+        "fix": {
+          "action": "remove_small",
+          "label": "移除碎屑"
+        },
+        "details": {},
+        "elapsed": 0.002
+      },
+      {
+        "id": "units",
+        "name": "单位与尺寸",
+        "severity": "ok",
+        "message": "最大尺寸 56.6mm，在绝大多数桌面机成型范围内，无需换算。",
+        "value": {
+          "unit": "mm",
+          "max_dim": 56.6,
+          "scale": 1.0,
+          "ambiguous": false,
+          "message": "最大尺寸 56.6mm，在绝大多数桌面机成型范围内，无需换算。"
+        },
+        "fix": null,
+        "details": {},
+        "elapsed": 0.0
+      }
+    ],
+    "summary": {
+      "total": 7,
+      "counts": {
+        "ok": 5,
+        "info": 0,
+        "warning": 2,
+        "error": 0
+      },
+      "worst": "warning",
+      "actionable": [
+        "thickness",
+        "components"
+      ],
+      "blocking": false,
+      "degraded": [],
+      "confidence": "normal"
+    },
+    "quality": {
+      "score": 81.0,
+      "grade": "B",
+      "verdict": "小问题，建议修一下再打",
+      "parts": [
+        {
+          "name": "水密性",
+          "score": 25.0,
+          "max": 25,
+          "note": "开放边 0，非流形 0，重复面 0"
+        },
+        {
+          "name": "法线",
+          "score": 15.0,
+          "max": 15,
+          "note": "朝内部件 0，绕序冲突 0，退化面 0"
+        },
+        {
+          "name": "壁厚",
+          "score": 7,
+          "max": 20,
+          "note": "最薄 0.50mm"
+        },
+        {
+          "name": "流形性",
+          "score": 15.0,
+          "max": 15,
+          "note": "非流形边 0，重复面 0"
+        },
+        {
+          "name": "自交",
+          "score": 10.0,
+          "max": 10,
+          "note": "穿插 0 处"
+        },
+        {
+          "name": "连通性",
+          "score": 4,
+          "max": 10,
+          "note": "3 个部件"
+        },
+        {
+          "name": "单位",
+          "score": 5.0,
+          "max": 5,
+          "note": "mm"
+        }
+      ],
+      "max": 100,
+      "degraded": [],
+      "caveats": [],
+      "confidence": "normal"
+    },
+    "failed_checks": []
+  },
+  "advice": null,
+  "stats": {},
+  "tags": [
+    "示例"
+  ],
+  "favorite": false
+}

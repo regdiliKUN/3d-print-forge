@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest httpx
+
+      - name: 单元测试
+        run: python -m pytest tests/ -q --tb=short
+
+      - name: 端到端测试
+        run: python tests/e2e.py
+
+      - name: 冒烟启动（确认服务能起来并响应）
+        run: |
+          python run.py 8123 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8123/api/health > /dev/null; then
+              echo "服务已就绪"
+              curl -s http://127.0.0.1:8123/api/workflow | head -c 200
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "服务启动超时"
+          exit 1
