@@ -4,6 +4,12 @@ An all-in-one local web toolkit that takes an STL from import to a print-ready p
 
 > Chinese documentation: [README.md](README.md)
 
+## Portable Windows build
+
+1. Download `3d-print-forge-1.0.0-win-x64.zip` from the [v1.0.0 release](https://github.com/regdiliKUN/3d-print-forge/releases/tag/v1.0.0) and extract the complete archive.
+2. Open the extracted folder and run `3D打印建模工具.exe`. Python is included in the packaged app.
+3. The app opens `http://127.0.0.1:8000` in your browser. If the browser does not open automatically, visit that address manually.
+
 ## Quick start
 
 ```bash
@@ -155,3 +161,7 @@ CI runs on GitHub Actions across Python 3.11 and 3.12: unit tests, end-to-end, a
 - Self-intersection uses KD-tree local candidates, so it is an approximation in theory — in practice self-intersections are always local.
 - Supports are straight frustums; no tree supports or contact-point refinement. Complex parts still need tuning in the slicer.
 - The 3D preview loads Three.js from a CDN; offline environments degrade to a notice, everything else keeps working.
+
+## License
+
+The project source is licensed under the MIT License. See [LICENSE](LICENSE). Third-party components retain their respective licenses.

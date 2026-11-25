@@ -4,6 +4,12 @@
 
 从导入 STL 到产出可打印成品的一站式处理工具集。分步向导、七项模型体检、自动修复、镂空打孔、支撑生成、参数建议、批量处理，全部在一个本地 Web 界面里完成。
 
+## Windows 免安装版
+
+1. 从 [v1.0.0 Release](https://github.com/regdiliKUN/3d-print-forge/releases/tag/v1.0.0) 下载 `3d-print-forge-1.0.0-win-x64.zip`，完整解压。
+2. 打开解压目录，双击 `3D打印建模工具.exe`。无需安装 Python。
+3. 程序会打开本地页面 `http://127.0.0.1:8000`。浏览器未自动打开时，可以手动访问该地址。
+
 ## 快速开始
 
 ```bash
@@ -421,3 +427,7 @@ python devctl.py done s7   # 验收并标记
 ```
 
 会话被限流或中断后，跑 `status` 就知道做到哪了，已完成的代码不会丢。
+
+## 许可
+
+项目源码采用 MIT 许可证，见 [LICENSE](LICENSE)。第三方组件适用各自的许可证。
